@@ -27,10 +27,7 @@ async def validation_exception_handler(request: Request, exc: RequestValidationE
 
 # 🌐 CORS setup
 origins = [
-    "http://192.168.1.14:5173",
-    "http://localhost:5173",
-    "http://127.0.0.1:5173",
-    "http://192.168.1.14:8000",
+    "http://adeesh.in",
 ]
 app.add_middleware(
     CORSMiddleware,
@@ -126,8 +123,8 @@ def delete_note(note_id: int, db: Session = Depends(get_db)):
     db.commit()
     return
 
-app.mount(
-    "/",
-    StaticFiles(directory="../frontend/dist", html=True),
-    name="frontend"
-)
+# app.mount(
+#     "/",
+#     StaticFiles(directory="../frontend/dist", html=True),
+#     name="frontend"
+# )
