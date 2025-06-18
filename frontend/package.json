@@ -1,6 +1,7 @@
 {
   "name": "taskmark-frontend",
   "version": "0.0.1",
+  "homepage": "https://adeesh.in/tasks",
   "scripts": {
     "dev": "vite",
     "build": "vite build",

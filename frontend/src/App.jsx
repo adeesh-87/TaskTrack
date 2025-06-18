@@ -2,7 +2,7 @@
 import { useState, useEffect } from 'react';
 
 // Helper for API calls
-const API_URL = 'http://lemopi:8000';
+const API_URL = 'https://tasktrack-4jn7.onrender.com/';
 async function fetchTasks() {
   const resp = await fetch(`${API_URL}/notes/`);
   if (!resp.ok) throw new Error('Failed to fetch tasks');
