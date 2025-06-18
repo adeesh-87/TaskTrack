@@ -5,14 +5,18 @@ from datetime import datetime
 class TaskNoteCreate(BaseModel):
     title: str
     content: str
-    tags: Optional[str] = None
+    tags: List[str] = []
 
-class TaskNoteRead(TaskNoteCreate):
+class TaskNoteRead(BaseModel):
     id: int
+    title: str
+    content: str
+    tags: List[str]
     created_at: datetime
 
     class Config:
         orm_mode = True
+
 
 class TaskNoteBase(BaseModel):
     title: str
