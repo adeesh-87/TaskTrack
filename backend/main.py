@@ -27,9 +27,9 @@ async def validation_exception_handler(request: Request, exc: RequestValidationE
 
 # 🌐 CORS setup
 origins = [
-    "*",
-    # "http://adeesh.in",
-    # "http://adeesh.in/tasks",
+    # "*",
+    "http://adeesh.in",
+    "http://adeesh.in/tasks",
 ]
 app.add_middleware(
     CORSMiddleware,
