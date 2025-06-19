@@ -27,14 +27,15 @@ async def validation_exception_handler(request: Request, exc: RequestValidationE
 
 # 🌐 CORS setup
 origins = [
-    "http://adeesh.in",
-    "http://adeesh.in/tasks",
+    "*",
+    # "http://adeesh.in",
+    # "http://adeesh.in/tasks",
 ]
 app.add_middleware(
     CORSMiddleware,
     allow_origins=origins,
     allow_credentials=True,
-    allow_methods=["*"],
+    allow_methods=["DELETE, GET, HEAD, OPTIONS, PATCH, POST, PUT"],
     allow_headers=["*"],
 )
 # :contentReference[oaicite:1]{index=1}
