@@ -13,7 +13,7 @@ from fastapi.staticfiles import StaticFiles
 # Create database tables
 models.Base.metadata.create_all(bind=engine)
 
-app = FastAPI(title="TaskMark")
+app = FastAPI(title="TaskTrack")
 
 @app.exception_handler(RequestValidationError)
 async def validation_exception_handler(request: Request, exc: RequestValidationError):
