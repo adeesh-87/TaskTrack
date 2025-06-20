@@ -9,6 +9,8 @@ from fastapi.exceptions import RequestValidationError
 from fastapi.responses import JSONResponse
 from starlette import status
 from fastapi.staticfiles import StaticFiles
+from datetime import datetime, timezone
+from zoneinfo import ZoneInfo
 
 # Create database tables
 models.Base.metadata.create_all(bind=engine)
@@ -66,6 +68,8 @@ def create_note(note: schemas.TaskNoteCreate, db: Session = Depends(get_db)):
         content=db_note.content,
         tags=db_note.tags.split(",") if db_note.tags else [],
         created_at=db_note.created_at,
+        started_at=db_note.started_at,
+        elapsed_seconds=db_note.elapsed_seconds
     )
 
 # Read list of notes/tasks
@@ -79,6 +83,8 @@ def read_notes(db: Session = Depends(get_db)):
             content=n.content,
             tags=n.tags.split(",") if n.tags else [],
             created_at=n.created_at,
+            elapsed_seconds=n.elapsed_seconds,
+            started_at=n.started_at
         )
         for n in notes
     ]
@@ -95,6 +101,8 @@ def read_note(note_id: int, db: Session = Depends(get_db)):
         content=n.content,
         tags=n.tags.split(",") if n.tags else [],
         created_at=n.created_at,
+        started_at=n.started_at,
+        elapsed_seconds=n.elapsed_seconds
     )
 
 # Update a note/task
@@ -114,6 +122,8 @@ def update_note(note_id: int, note: schemas.TaskNoteCreate, db: Session = Depend
         content=n.content,
         tags=n.tags.split(",") if n.tags else [],
         created_at=n.created_at,
+        elapsed_seconds=n.elapsed_seconds,
+        started_at=n.started_at
     )
 
 # Delete a note/task
@@ -125,6 +135,31 @@ def delete_note(note_id: int, db: Session = Depends(get_db)):
     db.delete(n)
     db.commit()
     return
+
+@app.post("/notes/{note_id}/start")
+def start_timer(note_id: int, db: Session = Depends(get_db)):
+    note = db.query(models.TaskNote).get(note_id)
+    if note is None:
+        raise HTTPException(status_code=404)
+    note.started_at = datetime.now()
+    note.started_at = note.started_at.replace(tzinfo=ZoneInfo('Asia/Kolkata'))
+    db.commit()
+    db.refresh(note)
+
+@app.post("/notes/{note_id}/stop")
+def stop_timer(note_id: int, db: Session = Depends(get_db)):
+    note = db.query(models.TaskNote).get(note_id)
+    if note is None or note.started_at is None:
+        raise HTTPException(status_code=400)
+    tNow = datetime.now()
+    note.started_at = note.started_at.replace(tzinfo=ZoneInfo('Asia/Kolkata'))
+    tNow = tNow.replace(tzinfo=ZoneInfo('Asia/Kolkata'))
+    delta = tNow - note.started_at
+    note.elapsed_seconds += int(delta.total_seconds())
+    print("note.elapsed_seconds ", note.elapsed_seconds, " started at ", note.started_at)
+    note.started_at = None
+    db.commit()
+    db.refresh(note)
 
 # app.mount(
 #     "/",

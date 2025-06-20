@@ -13,6 +13,8 @@ class TaskNoteRead(BaseModel):
     content: str
     tags: List[str]
     created_at: datetime
+    started_at: Optional[datetime]  # 👈 Include this
+    elapsed_seconds: int            # 👈 And this too
 
     class Config:
         orm_mode = True

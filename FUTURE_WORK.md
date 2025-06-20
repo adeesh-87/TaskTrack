@@ -15,7 +15,7 @@ This document outlines ideas, goals, and planned features for growing TaskTrack 
   - Tasks/notes scoped to the current user
   - Secure password storage using hashing
 - [ ] Establish **Git/CI Structure**:
-  - `localtest`: Raspberry Pi-based dev branch
+  - `local`: Raspberry Pi-based dev branch
   - `main`: Merged after local testing is complete
   - `prod`: Built automatically from `main` with Render-specific configs
   - `selfhost`: For on-premise use, with backend serving static frontend
