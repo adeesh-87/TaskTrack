@@ -145,7 +145,7 @@ fn draw_status_bar(frame: &mut Frame<'_>, app: &mut App, area: Rect, theme: &The
                 Some(Focus::Terminal) => {
                     format!("keys go to the shell · {leader} q leave · {leader} ? help · Ctrl+Tab next pane")
                 }
-                Some(Focus::Editor) => "Esc commands · Ctrl+S save · Ctrl+Z undo · Ctrl+F find · Ctrl+Tab next pane".to_owned(),
+                Some(Focus::Editor) => "Esc commands · Ctrl+S save · Ctrl+C/X/V copy/cut/paste · Ctrl+Z undo · Ctrl+F find · F1 help".to_owned(),
                 Some(Focus::Shells) => "Esc commands · Enter focus · n new · x close · Ctrl+1..9 select".to_owned(),
                 _ => "Esc commands · F1 help · Enter open · a/A new · r rename · d delete · t shell".to_owned(),
             },

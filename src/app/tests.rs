@@ -1410,3 +1410,130 @@ fn tmux_backed_shells_survive_pahiri() {
     std::env::remove_var("PAHIRI_TMUX_SOCKET");
     h.app.shutdown();
 }
+
+fn with_mods(code: KeyCode, mods: KeyModifiers) -> KeyEvent {
+    KeyEvent::new(code, mods)
+}
+
+fn editor_text(h: &Harness) -> String {
+    h.ctx().editor.as_ref().unwrap().text()
+}
+
+fn editor_selection(h: &Harness) -> Option<String> {
+    h.ctx().editor.as_ref().unwrap().selected_text()
+}
+
+#[test]
+fn editor_selects_moves_by_word_and_copies_cuts_pastes() {
+    let mut h = Harness::new(true);
+    h.press(key(KeyCode::Enter));
+    h.press(key(KeyCode::Esc));
+    h.press(key(KeyCode::Char('o')));
+    h.press(with_mods(KeyCode::End, KeyModifiers::CONTROL));
+    h.type_str("fix the login bug");
+    // Ctrl+← moves by word; Ctrl+Shift+← selects by word.
+    h.press(with_mods(KeyCode::Left, KeyModifiers::CONTROL));
+    h.press(with_mods(
+        KeyCode::Left,
+        KeyModifiers::CONTROL | KeyModifiers::SHIFT,
+    ));
+    assert_eq!(editor_selection(&h).as_deref(), Some("login "));
+    h.press(with_mods(KeyCode::Right, KeyModifiers::SHIFT));
+    assert_eq!(editor_selection(&h).as_deref(), Some("ogin "));
+    // Ctrl+C copies (and does not quit), also to the terminal via OSC 52.
+    h.press(ctrl('c'));
+    assert!(!h.app.should_quit() && h.app.popup().is_none());
+    assert_eq!(h.app.clipboard, "ogin ");
+    assert!(h.app.status().unwrap_or("").contains("copied"));
+    let out = String::from_utf8(h.app.take_terminal_output()).unwrap();
+    assert!(out.starts_with("\x1b]52;c;"), "{out:?}");
+    // → collapses the selection to its end; Ctrl+V pastes.
+    h.press(key(KeyCode::Right));
+    assert_eq!(editor_selection(&h), None);
+    h.press(ctrl('v'));
+    assert!(editor_text(&h).ends_with("fix the login ogin bug"));
+    // Shift+Home then Ctrl+X cuts to the line start; Ctrl+Z brings it back.
+    h.press(with_mods(KeyCode::Home, KeyModifiers::SHIFT));
+    h.press(ctrl('x'));
+    assert!(editor_text(&h).ends_with("\nbug"), "{}", editor_text(&h));
+    assert_eq!(h.app.clipboard, "fix the login ogin ");
+    h.press(ctrl('z'));
+    assert!(editor_text(&h).ends_with("fix the login ogin bug"));
+    // Ctrl+Backspace (Ctrl+H in most terminals) deletes a word.
+    h.press(with_mods(KeyCode::End, KeyModifiers::NONE));
+    h.press(ctrl('h'));
+    assert!(editor_text(&h).ends_with("fix the login ogin "));
+    // Typing replaces a selection; Ctrl+A selects everything.
+    h.press(ctrl('a'));
+    h.type_str("new");
+    assert_eq!(editor_text(&h), "new");
+    // Ctrl+C with nothing selected copies the line.
+    h.press(ctrl('c'));
+    assert_eq!(h.app.clipboard, "new");
+}
+
+#[test]
+fn copy_and_paste_commands_reach_the_system_clipboard() {
+    let mut h = Harness::build(true, |cfg| {
+        cfg.copy_command = "cat > copied.txt".into();
+        cfg.paste_command = "printf 'from system'".into();
+    });
+    let copied = h.tasks.join("copied.txt");
+    h.press(key(KeyCode::Enter));
+    h.press(key(KeyCode::Esc));
+    h.press(key(KeyCode::Char('o')));
+    h.press(ctrl('a'));
+    h.press(ctrl('c'));
+    assert!(
+        h.app.take_terminal_output().is_empty(),
+        "no OSC 52 with a command"
+    );
+    let deadline = std::time::Instant::now() + Duration::from_secs(5);
+    while fs::read_to_string(&copied).unwrap_or_default().is_empty()
+        && std::time::Instant::now() < deadline
+    {
+        std::thread::sleep(Duration::from_millis(20));
+    }
+    assert_eq!(fs::read_to_string(&copied).unwrap(), "# alpha\n");
+    h.press(ctrl('v'));
+    assert_eq!(editor_text(&h), "from system");
+}
+
+#[test]
+fn mouse_drag_and_multi_click_select_in_the_editor() {
+    let mut h = Harness::new(true);
+    fs::write(
+        h.tasks.join("alpha/CONTEXT.md"),
+        "# alpha\nfirst line here\nsecond line\n",
+    )
+    .unwrap();
+    h.press(key(KeyCode::Enter));
+    h.press(key(KeyCode::Esc));
+    h.press(key(KeyCode::Char('o')));
+    h.app.ui.editor = Rect::new(24, 1, 60, 10);
+    h.app.ui.editor_gutter = 3;
+    let at = |kind, col: u16, row: u16| MouseEvent {
+        kind,
+        column: 24 + 3 + col,
+        row: 1 + row,
+        modifiers: KeyModifiers::NONE,
+    };
+    let left = MouseButton::Left;
+    // Press on "line" in row 1, drag into row 2, release.
+    h.mouse(at(MouseEventKind::Down(left), 6, 1));
+    assert_eq!(editor_selection(&h), None, "a plain click selects nothing");
+    h.mouse(at(MouseEventKind::Drag(left), 6, 2));
+    h.mouse(at(MouseEventKind::Up(left), 6, 2));
+    assert_eq!(editor_selection(&h).as_deref(), Some("line here\nsecond"));
+    // Dragging past the bottom of the pane keeps selecting (to the last line).
+    h.mouse(at(MouseEventKind::Down(left), 0, 0));
+    h.mouse(at(MouseEventKind::Drag(left), 3, 20));
+    assert!(editor_selection(&h).unwrap().starts_with("# alpha\nfirst"));
+    h.mouse(at(MouseEventKind::Up(left), 3, 20));
+    // Double-click selects a word, a third click the line.
+    h.mouse(at(MouseEventKind::Down(left), 1, 2));
+    h.mouse(at(MouseEventKind::Down(left), 1, 2));
+    assert_eq!(editor_selection(&h).as_deref(), Some("second"));
+    h.mouse(at(MouseEventKind::Down(left), 1, 2));
+    assert_eq!(editor_selection(&h).as_deref(), Some("second line\n"));
+}

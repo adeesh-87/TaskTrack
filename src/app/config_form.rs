@@ -87,6 +87,10 @@ pub enum FieldKey {
     ArchiveDays,
     /// Soft wrap in the editor.
     SoftWrap,
+    /// Clipboard copy command.
+    CopyCommand,
+    /// Clipboard paste command.
+    PasteCommand,
     /// Reopen shells after a restart.
     RestoreShells,
     /// Run shells inside tmux.
@@ -458,7 +462,7 @@ impl ConfigForm {
             field(
                 FieldKey::Mouse,
                 "Mouse",
-                "Click to focus and select, wheel to scroll, forwarded to programs that ask. Shift+drag selects text. Takes effect on restart.",
+                "Click to focus and select, drag to select in the editor, wheel to scroll, forwarded to programs that ask. Shift+drag uses the terminal's own selection. Takes effect on restart.",
                 Value::Toggle(cfg.mouse),
             ),
             field(
@@ -472,6 +476,18 @@ impl ConfigForm {
                 "Soft wrap",
                 "Wrap long lines of Markdown and plain text in the editor.",
                 Value::Toggle(cfg.soft_wrap),
+            ),
+            field(
+                FieldKey::CopyCommand,
+                "Copy command",
+                "Gets copied text on stdin, e.g. wl-copy, xclip -selection clipboard, pbcopy. Empty: the terminal's clipboard via OSC 52.",
+                Value::Text(cfg.copy_command.clone()),
+            ),
+            field(
+                FieldKey::PasteCommand,
+                "Paste command",
+                "Ctrl+V in the editor pastes its output, e.g. wl-paste -n, xclip -o -selection clipboard, pbpaste. Empty: what pahiri copied last. The terminal's own paste always works.",
+                Value::Text(cfg.paste_command.clone()),
             ),
             field(
                 FieldKey::TabWidth,
@@ -956,6 +972,12 @@ impl ConfigForm {
                     Err(_) => errors.push(format!("archive days must be a number, got {v:?}")),
                 },
                 (FieldKey::SoftWrap, Value::Toggle(b)) => cfg.soft_wrap = *b,
+                (FieldKey::CopyCommand, Value::Text(v)) => {
+                    v.trim().clone_into(&mut cfg.copy_command);
+                }
+                (FieldKey::PasteCommand, Value::Text(v)) => {
+                    v.trim().clone_into(&mut cfg.paste_command);
+                }
                 (FieldKey::RestoreShells, Value::Toggle(b)) => cfg.restore_shells = *b,
                 (FieldKey::ShellTmux, Value::Toggle(b)) => cfg.shell.tmux = *b,
                 (FieldKey::Keys, Value::List(items)) => {

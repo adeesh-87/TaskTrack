@@ -289,6 +289,12 @@ pub struct Config {
     pub archive_after_days: u64,
     /// Soft-wrap long lines of Markdown and plain text in the editor.
     pub soft_wrap: bool,
+    /// Command that receives copied text on stdin (e.g. `wl-copy`,
+    /// `xclip -selection clipboard`, `pbcopy`). Empty: tell the terminal with OSC 52.
+    pub copy_command: String,
+    /// Command whose stdout Ctrl+V pastes (e.g. `wl-paste -n`, `pbpaste`).
+    /// Empty: Ctrl+V pastes what pahiri copied last.
+    pub paste_command: String,
     /// Reopen each task's shells (in the same folders) after a restart.
     pub restore_shells: bool,
     /// Key overrides: `palette.<action> = "x"` or `leader.<command> = "x"`.
@@ -328,6 +334,8 @@ impl Default for Config {
             hook_timeout_secs: 15,
             archive_after_days: 14,
             soft_wrap: true,
+            copy_command: String::new(),
+            paste_command: String::new(),
             restore_shells: true,
             keys: BTreeMap::new(),
             agent: AgentConfig::default(),

@@ -405,7 +405,21 @@ fn draw_editor(frame: &mut Frame<'_>, app: &mut App, area: Rect, theme: &Theme) 
     let block = Block::bordered()
         .title(Span::styled(title, Style::new().fg(theme.accent)))
         .title_bottom(Line::styled(
-            format!(" {}:{} ", ed.cursor().0 + 1, ed.cursor().1 + 1),
+            match ed.selection() {
+                Some((a, b)) if a.0 == b.0 => format!(
+                    " {}:{} · {} selected ",
+                    ed.cursor().0 + 1,
+                    ed.cursor().1 + 1,
+                    b.1 - a.1
+                ),
+                Some((a, b)) => format!(
+                    " {}:{} · {} lines selected ",
+                    ed.cursor().0 + 1,
+                    ed.cursor().1 + 1,
+                    b.0 - a.0 + 1
+                ),
+                None => format!(" {}:{} ", ed.cursor().0 + 1, ed.cursor().1 + 1),
+            },
             Style::new().fg(theme.muted),
         ))
         .border_style(theme.border(focused));
@@ -511,6 +525,39 @@ fn draw_editor(frame: &mut Frame<'_>, app: &mut App, area: Rect, theme: &Theme) 
         state = next_state;
     }
     frame.render_widget(Paragraph::new(lines), inner);
+    if let Some((start, end)) = ed.selection() {
+        let style = Style::new().bg(theme.selected_bg).fg(theme.selected_fg);
+        let text_x = inner.x + gutter;
+        let buf = frame.buffer_mut();
+        for (vi, &(i, chunk_start)) in rows.iter().enumerate() {
+            if i < start.0 || i > end.0 {
+                continue;
+            }
+            let line = &ed.lines()[i];
+            let from = if i == start.0 {
+                display_col(line, start.1, tab_width)
+            } else {
+                0
+            };
+            // A selected line break shows as one extra cell after the text.
+            let to = if i == end.0 {
+                display_col(line, end.1, tab_width)
+            } else {
+                display_col(line, line.chars().count(), tab_width) + 1
+            };
+            let chunk_end = match rows.get(vi + 1) {
+                Some(&(next, s)) if next == i => s,
+                _ => chunk_start + text_width,
+            };
+            let y = inner.y + vi as u16;
+            for col in from.max(chunk_start)..to.min(chunk_end) {
+                let x = text_x + (col - chunk_start) as u16;
+                if x < inner.x + inner.width {
+                    buf[(x, y)].set_style(style);
+                }
+            }
+        }
+    }
     if !title_lang.is_empty() {
         let w = title_lang.chars().count() as u16;
         if area.width > w + 4 {

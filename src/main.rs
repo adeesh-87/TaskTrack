@@ -278,6 +278,13 @@ fn run(
         terminal
             .draw(|f| pahiri::ui::draw(f, app))
             .context("drawing frame")?;
+        let out = app.take_terminal_output();
+        if !out.is_empty() {
+            use std::io::Write as _;
+            let mut stdout = io::stdout();
+            let _ = stdout.write_all(&out);
+            let _ = stdout.flush();
+        }
         if app.take_bell() {
             use std::io::Write as _;
             let mut out = io::stdout();

@@ -37,14 +37,15 @@ loop: terminal.draw(ui::draw(&mut app)) → wait for next event → app.handle
 | `src/app/timer.rs` | pure timer arithmetic (budget, overtime, idle/away, booking minutes, save/restore) |
 | `src/app/context.rs` | `TaskContext`: per-task tree, shells, editor, focus, meta, checkpoints |
 | `src/app/config_form.rs` | settings page model (`FieldKey`, fields, list editing, `to_config`) |
-| `src/app/mouse.rs`, `ui_state.rs` | mouse handling and recorded geometry |
+| `src/app/mouse.rs`, `ui_state.rs` | mouse handling (editor drag / word / line selection) and recorded geometry |
+| `src/app/clipboard.rs` | editor copy/paste: internal clipboard, `copy_command` / OSC 52 (written by `main.rs` after a frame), `paste_command` |
 | `src/app/keymap.rs` | leader commands table, key overrides (`[keys]`) and their validation |
 | `src/hooks.rs` | hook events (names, descriptions, env docs) and the `sh -c` runner |
 | `src/tasks/` | disk model: `store.rs` (folders, board, trash, outside changes), `board.rs` (`status.md`), `context.rs` (managed block, log, context, dates), `checkpoints.rs`, `sections.rs` (marker helpers), `merge.rs` (save-merge of CONTEXT.md), `ledger.rs` (`timelog.tsv`), `record.rs` (read-only summary), `sources.rs` (ticket and Gerrit status script output) |
 | `src/ai/mod.rs` | prompt templates, fixed output formats, `run()` for one-shot agents |
 | `src/git/mod.rs` | `prepare`, main-branch detection, `Change-Id` scan, fetch, push for review, rebase |
 | `src/terminal/` | PTY sessions, key/mouse encoding, VT rendering, shell `cd` integration |
-| `src/editor/`, `src/files/`, `src/highlight/` | text buffer, file tree/ops, syntax lexers |
+| `src/editor/`, `src/files/`, `src/highlight/` | text buffer (cursor, selection anchor, word moves, undo), file tree/ops, syntax lexers |
 | `src/ui/` | ratatui drawing: `mod.rs` (layout, status bar, flash), `task_list`, `task_view` (sidebar, next up, editor, terminal), `popup`, `config_page`, `theme` |
 | `src/time.rs` | RFC 3339 formatting without a date crate |
 
