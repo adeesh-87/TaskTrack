@@ -56,6 +56,7 @@ screen = pyte.Screen(COLS, ROWS)
 stream = pyte.ByteStream(screen)
 env = {**os.environ, "TERM": "xterm-256color", "XDG_STATE_HOME": state}
 child = pexpect.spawn(BIN, ["--config", cfg], dimensions=(ROWS, COLS), env=env, timeout=5)
+# pahiri enables mouse reporting; make pyte ignore those private-mode requests quietly.
 failures = []
 
 
@@ -110,6 +111,26 @@ dump("task created", "PROJ-42")
 send("\r", 1.0)                                # open PROJ-42
 send("\x1b"); send("o", 0.8)                   # open CONTEXT.md
 dump("context of ticket task", "Link: https://jira.example.com/browse/PROJ-42")
+
+
+def fg_at(needle):
+    """Foreground colour of the first char of `needle` on screen."""
+    for y, line in enumerate(screen.display):
+        x = line.find(needle)
+        if x >= 0:
+            return screen.buffer[y][x].fg
+    return None
+
+
+heading_fg = fg_at("# PROJ-42")
+plain_fg = fg_at("It does not flux")
+print("heading colour:", heading_fg, "plain colour:", plain_fg)
+if heading_fg == plain_fg:
+    failures.append("markdown heading not highlighted")
+# Mouse: click on the CONTEXT.md row of the file tree (col 3, row 3) selects it and
+# focuses the files pane; a second click opens it (already open → focus editor).
+child.send("\x1b[<0;3;3M\x1b[<0;3;3m"); pump(0.5)
+dump("after mouse click on files", "files")
 send("\x1b"); send("a", 0.8)                   # attach
 dump("attach", "[ ] code")
 send(" "); send("\r", 0.8)

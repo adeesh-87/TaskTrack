@@ -8,6 +8,7 @@
 //! can never wipe out the surrounding UI.
 
 pub mod keys;
+pub mod mouse;
 pub mod pty;
 pub mod render;
 pub mod shellrc;

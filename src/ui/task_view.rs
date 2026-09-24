@@ -5,11 +5,12 @@ use std::fmt::Write as _;
 use ratatui::layout::{Constraint, Layout, Position, Rect};
 use ratatui::style::{Modifier, Style};
 use ratatui::text::{Line, Span};
-use ratatui::widgets::{Block, List, ListItem, ListState, Paragraph, Wrap};
+use ratatui::widgets::{Block, List, ListItem, Paragraph, Wrap};
 use ratatui::Frame;
-use unicode_width::UnicodeWidthStr;
 
 use crate::app::{App, Focus};
+use crate::editor::{display_col, expand_tabs};
+use crate::highlight::{Kind, Language, State};
 use crate::terminal::{cursor_position, TerminalView};
 
 use super::task_list::shorten;
@@ -41,25 +42,31 @@ pub fn draw_placeholder(frame: &mut Frame<'_>, area: Rect, theme: &Theme) {
 }
 
 /// Left column inside a task: task header, file tree, shell list.
-pub fn draw_sidebar(frame: &mut Frame<'_>, app: &App, area: Rect, theme: &Theme) {
+pub fn draw_sidebar(frame: &mut Frame<'_>, app: &mut App, area: Rect, theme: &Theme) {
     let Some(ctx) = app.active_context() else {
         return;
     };
+    let summary = ctx.attachment_summary();
+    let header_height = if summary.is_empty() { 1 } else { 2 };
     let [header, tree_area, shells_area] = Layout::vertical([
-        Constraint::Length(1),
+        Constraint::Length(header_height),
         Constraint::Percentage(60),
         Constraint::Min(4),
     ])
     .areas(area);
 
     let title = format!(" ◀ {} ", ctx.id);
-    frame.render_widget(
-        Paragraph::new(Span::styled(
-            shorten(&title, area.width as usize),
-            Style::new().fg(theme.header).add_modifier(Modifier::BOLD),
-        )),
-        header,
-    );
+    let mut header_lines = vec![Line::styled(
+        shorten(&title, area.width as usize),
+        Style::new().fg(theme.header).add_modifier(Modifier::BOLD),
+    )];
+    if !summary.is_empty() {
+        header_lines.push(Line::styled(
+            shorten(&format!(" {summary}"), area.width as usize),
+            Style::new().fg(theme.muted),
+        ));
+    }
+    frame.render_widget(Paragraph::new(header_lines), header);
 
     // File tree.
     let focused = ctx.focus == Focus::Tree;
@@ -95,15 +102,11 @@ pub fn draw_sidebar(frame: &mut Frame<'_>, app: &App, area: Rect, theme: &Theme)
     let list = List::new(items)
         .block(block)
         .highlight_style(theme.selected(focused));
-    let mut state = ListState::default();
-    if !ctx.tree.nodes().is_empty() {
-        state.select(Some(ctx.tree.selected_index()));
-    }
-    frame.render_stateful_widget(list, tree_area, &mut state);
+    let tree_selected = (!ctx.tree.nodes().is_empty()).then_some(ctx.tree.selected_index());
 
     // Shell list.
-    let focused = ctx.focus == Focus::Shells;
-    let items: Vec<ListItem<'_>> = ctx
+    let shells_focused = ctx.focus == Focus::Shells;
+    let shell_items: Vec<ListItem<'_>> = ctx
         .shells
         .iter()
         .map(|s| {
@@ -126,28 +129,36 @@ pub fn draw_sidebar(frame: &mut Frame<'_>, app: &App, area: Rect, theme: &Theme)
             ]))
         })
         .collect();
-    let block = Block::bordered()
+    let shells_block = Block::bordered()
         .title(Span::styled(
             format!(" shells {} ", ctx.shells.len()),
             Style::new().fg(theme.accent),
         ))
-        .border_style(theme.border(focused));
-    if items.is_empty() {
-        let inner = block.inner(shells_area);
-        frame.render_widget(block, shells_area);
+        .border_style(theme.border(shells_focused));
+    let selected_shell = ctx.selected_shell;
+    let no_shells = shell_items.is_empty();
+
+    app.ui.tree = tree_area;
+    app.ui.tree_state.select(tree_selected);
+    frame.render_stateful_widget(list, tree_area, &mut app.ui.tree_state);
+
+    app.ui.shells = shells_area;
+    if no_shells {
+        let inner = shells_block.inner(shells_area);
+        frame.render_widget(shells_block, shells_area);
         frame.render_widget(
             Paragraph::new("no shells · t opens one (Esc, s from anywhere)")
                 .style(Style::new().fg(theme.muted))
                 .wrap(Wrap { trim: true }),
             inner,
         );
+        app.ui.shells_state.select(None);
     } else {
-        let list = List::new(items)
-            .block(block)
-            .highlight_style(theme.selected(focused));
-        let mut state = ListState::default();
-        state.select(Some(ctx.selected_shell));
-        frame.render_stateful_widget(list, shells_area, &mut state);
+        let list = List::new(shell_items)
+            .block(shells_block)
+            .highlight_style(theme.selected(shells_focused));
+        app.ui.shells_state.select(Some(selected_shell));
+        frame.render_stateful_widget(list, shells_area, &mut app.ui.shells_state);
     }
 }
 
@@ -184,38 +195,46 @@ pub fn draw_workspace(frame: &mut Frame<'_>, app: &mut App, area: Rect, theme: &
     }
 }
 
-fn expand_tabs(line: &str, tab_width: usize) -> String {
-    if !line.contains('\t') {
-        return line.to_owned();
-    }
-    let mut out = String::new();
-    let mut col = 0;
-    for c in line.chars() {
-        if c == '\t' {
-            let n = tab_width - (col % tab_width);
-            out.push_str(&" ".repeat(n));
-            col += n;
-        } else {
-            out.push(c);
-            col += UnicodeWidthStr::width(c.to_string().as_str());
+/// Build the styled spans of one editor line, clipped to `[hscroll, hscroll + width)`.
+fn styled_line<'a>(
+    expanded: &str,
+    language: Option<Language>,
+    state: State,
+    hscroll: usize,
+    width: usize,
+    theme: &Theme,
+) -> (Vec<Span<'a>>, State) {
+    let chars: Vec<char> = expanded.chars().collect();
+    let visible = |start: usize, end: usize| -> Option<String> {
+        let s = start.max(hscroll);
+        let e = end.min(hscroll + width);
+        (s < e).then(|| chars[s..e].iter().collect())
+    };
+    let Some(lang) = language else {
+        let text = visible(0, chars.len()).unwrap_or_default();
+        return (vec![Span::raw(text)], State::Normal);
+    };
+    let (spans, next) = lang.highlight_line(expanded, state);
+    let mut out = Vec::new();
+    for sp in spans {
+        if let Some(text) = visible(sp.start, sp.end) {
+            match theme.syntax.style(sp.kind) {
+                Some(style) if sp.kind != Kind::Text => out.push(Span::styled(text, style)),
+                _ => out.push(Span::raw(text)),
+            }
         }
     }
-    out
-}
-
-/// Display column of char index `col` in `line` after tab expansion.
-fn display_col(line: &str, col: usize, tab_width: usize) -> usize {
-    let prefix: String = line.chars().take(col).collect();
-    UnicodeWidthStr::width(expand_tabs(&prefix, tab_width).as_str())
+    (out, next)
 }
 
 fn draw_editor(frame: &mut Frame<'_>, app: &mut App, area: Rect, theme: &Theme) {
     let tab_width = usize::from(app.config().tab_width.max(1));
+    let highlighting = app.config().syntax_highlighting;
     let Some(ctx) = app.active_context_mut() else {
         return;
     };
     let focused = ctx.focus == Focus::Editor;
-    let Some(ed) = &mut ctx.editor else { return };
+    let Some(ed) = &ctx.editor else { return };
 
     let mut title = format!(
         " {} ",
@@ -242,7 +261,17 @@ fn draw_editor(frame: &mut Frame<'_>, app: &mut App, area: Rect, theme: &Theme) 
     if inner.height == 0 || inner.width == 0 {
         return;
     }
-    ed.ensure_visible(inner.height as usize);
+    if let Some(ed) = &mut ctx.editor {
+        ed.ensure_visible(inner.height as usize);
+    }
+    if highlighting {
+        ctx.refresh_highlight();
+    } else {
+        ctx.highlight = None;
+    }
+    let Some(ed) = &ctx.editor else { return };
+    let language = ctx.highlight.as_ref().map(|h| h.language);
+    let title_lang = language.map_or(String::new(), |l| format!(" {l:?} ").to_lowercase());
 
     let gutter = (ed.lines().len().max(1).to_string().len() + 1) as u16;
     let text_width = inner.width.saturating_sub(gutter + 1) as usize;
@@ -258,25 +287,46 @@ fn draw_editor(frame: &mut Frame<'_>, app: &mut App, area: Rect, theme: &Theme) 
         cursor_disp.saturating_sub(text_width.saturating_sub(1))
     };
 
+    let first = ed.scroll();
+    let mut state = ctx
+        .highlight
+        .as_ref()
+        .and_then(|h| h.states.get(first).copied())
+        .unwrap_or_default();
     let lines: Vec<Line<'_>> = ed
         .lines()
         .iter()
         .enumerate()
-        .skip(ed.scroll())
+        .skip(first)
         .take(inner.height as usize)
         .map(|(i, l)| {
             let expanded = expand_tabs(l, tab_width);
-            let visible: String = expanded.chars().skip(hscroll).collect();
-            Line::from(vec![
-                Span::styled(
-                    format!("{:>w$} ", i + 1, w = gutter as usize - 1),
-                    Style::new().fg(theme.muted),
-                ),
-                Span::raw(visible),
-            ])
+            let (spans, next) = styled_line(&expanded, language, state, hscroll, text_width, theme);
+            state = next;
+            let mut all = vec![Span::styled(
+                format!("{:>w$} ", i + 1, w = gutter as usize - 1),
+                Style::new().fg(theme.muted),
+            )];
+            all.extend(spans);
+            Line::from(all)
         })
         .collect();
     frame.render_widget(Paragraph::new(lines), inner);
+    if !title_lang.is_empty() {
+        let w = title_lang.chars().count() as u16;
+        if area.width > w + 4 {
+            let rect = Rect {
+                x: area.x + area.width - w - 2,
+                y: area.y,
+                width: w,
+                height: 1,
+            };
+            frame.render_widget(
+                Paragraph::new(Span::styled(title_lang, Style::new().fg(theme.muted))),
+                rect,
+            );
+        }
+    }
 
     if focused {
         let y = inner.y + (crow - ed.scroll()) as u16;
@@ -285,7 +335,10 @@ fn draw_editor(frame: &mut Frame<'_>, app: &mut App, area: Rect, theme: &Theme) 
             frame.set_cursor_position(Position::new(x, y));
         }
     }
-    let () = app.set_editor_height(inner.height as usize);
+    app.ui.editor = inner;
+    app.ui.editor_gutter = gutter;
+    app.ui.editor_hscroll = hscroll;
+    app.set_editor_height(inner.height as usize);
 }
 
 /// Draw the active shell into `area`, resizing the PTY to fit.
@@ -346,17 +399,5 @@ pub fn draw_terminal(
             frame.set_cursor_position(pos);
         }
     }
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn tab_expansion_and_display_columns() {
-        assert_eq!(expand_tabs("a\tb", 4), "a   b");
-        assert_eq!(expand_tabs("\t\tx", 2), "    x");
-        assert_eq!(display_col("a\tb", 2, 4), 4);
-        assert_eq!(display_col("你好", 1, 4), 2);
-    }
+    app.ui.terminal = inner;
 }

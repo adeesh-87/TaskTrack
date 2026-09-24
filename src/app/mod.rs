@@ -9,8 +9,10 @@ pub mod context;
 pub mod event;
 pub mod palette;
 pub mod popup;
+pub mod ui_state;
 
 mod keymap;
+mod mouse;
 
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
@@ -33,6 +35,7 @@ pub use self::context::{Focus, Shell, TaskContext};
 pub use self::event::{AppEvent, EventSender, JobEvent};
 pub use self::palette::{Action, Palette};
 pub use self::popup::{CheckItem, Choice, Pending, Popup};
+pub use self::ui_state::UiState;
 
 /// Which top-level screen is showing.
 #[derive(Debug)]
@@ -87,6 +90,9 @@ pub struct App {
     editor_height: usize,
     /// Whether leaving the settings page returns to the task view (else the list).
     config_returns_to_task: bool,
+    /// Geometry of the last frame, for mouse hit-testing.
+    pub ui: UiState,
+    last_click: Option<(std::time::Instant, u16, u16)>,
 }
 
 impl App {
@@ -129,6 +135,8 @@ impl App {
             events,
             editor_height: 20,
             config_returns_to_task: false,
+            ui: UiState::default(),
+            last_click: None,
         };
         if matches!(app.mode, Mode::TaskList) {
             app.open_store();
@@ -293,9 +301,8 @@ impl App {
         match event {
             AppEvent::Input(Event::Key(key)) => self.handle_key(key),
             AppEvent::Input(Event::Paste(text)) => self.handle_paste(&text),
-            AppEvent::Input(
-                Event::Resize(..) | Event::FocusGained | Event::FocusLost | Event::Mouse(_),
-            )
+            AppEvent::Input(Event::Mouse(m)) => self.handle_mouse(m),
+            AppEvent::Input(Event::Resize(..) | Event::FocusGained | Event::FocusLost)
             | AppEvent::Tick => {}
             AppEvent::Pty(PtyEvent::Output { id, data }) => {
                 if let Some(shell) = self.shell_mut(id) {

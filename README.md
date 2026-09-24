@@ -102,6 +102,24 @@ startup files source your own first; bash gets `--rcfile`. The wrapper reads
 a per-task env file on each call, so attaching a workspace takes effect in
 shells that are already open.
 
+### Mouse
+
+The mouse works everywhere: click a pane to focus it, click a task, file or
+shell to select it, double-click to open, wheel to scroll lists, the editor
+and the terminal's scrollback, click in the editor to place the cursor.
+Programs that ask for mouse reporting (vim, less, agent CLIs) get the events
+forwarded in the encoding they requested. Hold **Shift** while dragging to
+select text with your terminal emulator as usual. `mouse = false` in the
+config turns capture off.
+
+### Syntax highlighting
+
+The editor highlights C, C++, Rust, Bash/zsh, Python, CMake, Makefiles, log
+files (timestamps, `ERROR`/`WARN`/`INFO`/`DEBUG` levels, `key=value` pairs,
+`[tags]`) and Markdown, detected from the file name or a `#!` line. The
+lexers are small and hand-written (no grammar files, instant startup) and
+follow the colour scheme. `syntax_highlighting = false` turns it off.
+
 ## Task sources (Jira, Orbit, …)
 
 A task source is a script that prints tickets. Configure one per tool:
@@ -207,6 +225,8 @@ Config: `~/.config/pahiri/config.toml`. Logs and generated shell files:
 | `font_family` | JetBrains Mono | advisory: terminal emulators own the font |
 | `large_file_kb` | 512 | bigger files ask before opening; binaries always ask |
 | `show_hidden` | false | `.` toggles at runtime |
+| `mouse` | true | mouse capture (Shift+drag still selects text) |
+| `syntax_highlighting` | true | C, C++, Rust, Bash, Python, CMake, Make, logs, Markdown |
 | `tab_width` | 4 | editor rendering |
 | `scrollback_lines` | 5000 | per shell |
 | `status_file` | `status.md` | board file inside `tasks_dir` |
@@ -245,6 +265,7 @@ src/
   files/     lazy file tree and file operations
   editor/    minimal text buffer
   git/       the prepare sequence (real git, tested against temp repos)
+  highlight/ hand-written lexers: C-like family, Makefile, log, Markdown
   terminal/  PTY sessions, key encoding, VT rendering, shell integration
   app/       state machine: modes, focus, palette, popups, jobs
   ui/        drawing only

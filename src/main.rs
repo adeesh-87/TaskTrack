@@ -8,8 +8,8 @@ use std::time::Duration;
 use anyhow::{Context as _, Result};
 use clap::Parser;
 use crossterm::event::{
-    DisableBracketedPaste, EnableBracketedPaste, KeyboardEnhancementFlags,
-    PopKeyboardEnhancementFlags, PushKeyboardEnhancementFlags,
+    DisableBracketedPaste, DisableMouseCapture, EnableBracketedPaste, EnableMouseCapture,
+    KeyboardEnhancementFlags, PopKeyboardEnhancementFlags, PushKeyboardEnhancementFlags,
 };
 use crossterm::execute;
 use tracing::info;
@@ -95,6 +95,10 @@ fn main() -> Result<()> {
 
     let mut terminal = ratatui::try_init().context("initialising terminal")?;
     let _ = execute!(io::stdout(), EnableBracketedPaste);
+    let mouse = app.config().mouse;
+    if mouse {
+        let _ = execute!(io::stdout(), EnableMouseCapture);
+    }
     // The kitty keyboard protocol lets the terminal report Ctrl+Tab, Ctrl+1 and
     // friends; without it the Alt+] / Alt+1 aliases still work everywhere.
     let enhanced = crossterm::terminal::supports_keyboard_enhancement().unwrap_or(false);
@@ -112,6 +116,9 @@ fn main() -> Result<()> {
     app.shutdown();
     if enhanced {
         let _ = execute!(io::stdout(), PopKeyboardEnhancementFlags);
+    }
+    if mouse {
+        let _ = execute!(io::stdout(), DisableMouseCapture);
     }
     let _ = execute!(io::stdout(), DisableBracketedPaste);
     ratatui::restore();

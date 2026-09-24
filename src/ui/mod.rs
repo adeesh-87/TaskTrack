@@ -22,6 +22,7 @@ pub const SIDEBAR_PERCENT: u16 = 20;
 /// Draw one frame.
 pub fn draw(frame: &mut Frame<'_>, app: &mut App) {
     let theme = Theme::for_scheme(app.config().color_scheme);
+    app.ui.begin_frame();
     let area = frame.area();
     frame.render_widget(
         ratatui::widgets::Block::new().style(Style::new().bg(theme.bg).fg(theme.fg)),

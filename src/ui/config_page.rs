@@ -12,13 +12,14 @@ use crate::app::{App, Mode};
 use super::Theme;
 
 /// Draw the settings page.
-pub fn draw(frame: &mut Frame<'_>, app: &App, area: Rect, theme: &Theme) {
+pub fn draw(frame: &mut Frame<'_>, app: &mut App, area: Rect, theme: &Theme) {
+    let config_path = app.config_path().display().to_string();
     let Mode::Config(form) = app.mode() else {
         return;
     };
     let block = Block::bordered()
         .title(Span::styled(
-            format!(" pahiri · settings · {} ", app.config_path().display()),
+            format!(" pahiri · settings · {config_path} "),
             Style::new().fg(theme.accent).add_modifier(Modifier::BOLD),
         ))
         .border_style(theme.border(true));
@@ -160,6 +161,7 @@ pub fn draw(frame: &mut Frame<'_>, app: &App, area: Rect, theme: &Theme) {
         }
     }
 
+    let (rows_rect, first_row) = (fields_area, first);
     let field = &form.fields()[form.selected_field()];
     let help_text = match form.selected_row() {
         Row::Field(_) => field.help.to_owned(),
@@ -185,4 +187,6 @@ pub fn draw(frame: &mut Frame<'_>, app: &App, area: Rect, theme: &Theme) {
             errors_area,
         );
     }
+    app.ui.config_rows = rows_rect;
+    app.ui.config_first_row = first_row;
 }

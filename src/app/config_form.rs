@@ -33,6 +33,10 @@ pub enum FieldKey {
     LargeFileKb,
     /// Show hidden files.
     ShowHidden,
+    /// Mouse capture.
+    Mouse,
+    /// Syntax highlighting.
+    Highlighting,
     /// Editor tab width.
     TabWidth,
     /// Scrollback lines.
@@ -246,6 +250,18 @@ impl ConfigForm {
                 Value::Toggle(cfg.show_hidden),
             ),
             field(
+                FieldKey::Mouse,
+                "Mouse",
+                "Click to focus and select, wheel to scroll, forwarded to programs that ask. Shift+drag selects text. Takes effect on restart.",
+                Value::Toggle(cfg.mouse),
+            ),
+            field(
+                FieldKey::Highlighting,
+                "Syntax highlighting",
+                "Colour C, C++, Rust, Bash, Python, CMake, Makefiles, logs and Markdown in the editor.",
+                Value::Toggle(cfg.syntax_highlighting),
+            ),
+            field(
                 FieldKey::TabWidth,
                 "Tab width",
                 "Columns per tab character in the editor.",
@@ -306,6 +322,11 @@ impl ConfigForm {
     /// Selected row index (into [`ConfigForm::rows`]).
     pub fn selected(&self) -> usize {
         self.selected
+    }
+
+    /// Select row `index` (clamped).
+    pub fn select(&mut self, index: usize) {
+        self.selected = index.min(self.rows().len() - 1);
     }
 
     /// The selected row.
@@ -619,6 +640,8 @@ impl ConfigForm {
                     }
                 },
                 (FieldKey::ShowHidden, Value::Toggle(b)) => cfg.show_hidden = *b,
+                (FieldKey::Mouse, Value::Toggle(b)) => cfg.mouse = *b,
+                (FieldKey::Highlighting, Value::Toggle(b)) => cfg.syntax_highlighting = *b,
                 (FieldKey::TabWidth, Value::Number(v)) => match v.trim().parse() {
                     Ok(n) => cfg.tab_width = n,
                     Err(_) => errors.push(format!("tab width must be a number 1-255, got {v:?}")),

@@ -15,6 +15,8 @@ pub struct Buffer {
     scroll: usize,
     dirty: bool,
     read_only: bool,
+    /// Incremented on every content change (used to invalidate caches).
+    revision: u64,
 }
 
 impl Buffer {
@@ -41,6 +43,7 @@ impl Buffer {
             scroll: 0,
             dirty: false,
             read_only,
+            revision: 0,
         }
     }
 
@@ -72,6 +75,32 @@ impl Buffer {
     /// Whether editing is disabled.
     pub fn is_read_only(&self) -> bool {
         self.read_only
+    }
+
+    /// Content revision; changes whenever the text changes.
+    pub fn revision(&self) -> u64 {
+        self.revision
+    }
+
+    /// Place the cursor (clamped to the buffer).
+    pub fn set_cursor(&mut self, row: usize, col: usize) {
+        self.cursor.0 = row.min(self.lines.len() - 1);
+        self.cursor.1 = col.min(self.line_len(self.cursor.0));
+    }
+
+    /// Scroll the viewport by `delta` lines, dragging the cursor along so it stays visible.
+    pub fn scroll_by(&mut self, delta: i32, height: usize) {
+        let height = height.max(1);
+        let max_scroll = self.lines.len().saturating_sub(height);
+        let next = (self.scroll as i64 + i64::from(delta)).clamp(0, max_scroll as i64) as usize;
+        self.scroll = next;
+        if self.cursor.0 < self.scroll {
+            self.cursor.0 = self.scroll;
+            self.clamp_col();
+        } else if self.cursor.0 >= self.scroll + height {
+            self.cursor.0 = self.scroll + height - 1;
+            self.clamp_col();
+        }
     }
 
     /// Buffer contents joined with newlines.
@@ -202,6 +231,7 @@ impl Buffer {
         line.insert(idx, c);
         self.cursor.1 += 1;
         self.dirty = true;
+        self.revision += 1;
     }
 
     /// Insert a string (e.g. a paste) at the cursor, honouring newlines.
@@ -226,6 +256,7 @@ impl Buffer {
         self.lines.insert(row + 1, rest);
         self.cursor = (row + 1, 0);
         self.dirty = true;
+        self.revision += 1;
     }
 
     /// Delete the character before the cursor (joining lines at column 0).
@@ -239,12 +270,16 @@ impl Buffer {
             self.lines[row].remove(idx);
             self.cursor.1 -= 1;
             self.dirty = true;
+            self.revision += 1;
+            self.revision += 1;
         } else if row > 0 {
             let line = self.lines.remove(row);
             let prev_len = self.line_len(row - 1);
             self.lines[row - 1].push_str(&line);
             self.cursor = (row - 1, prev_len);
             self.dirty = true;
+            self.revision += 1;
+            self.revision += 1;
         }
     }
 
@@ -258,12 +293,61 @@ impl Buffer {
             let idx = Self::byte_index(&self.lines[row], col);
             self.lines[row].remove(idx);
             self.dirty = true;
+            self.revision += 1;
+            self.revision += 1;
         } else if row + 1 < self.lines.len() {
             let next = self.lines.remove(row + 1);
             self.lines[row].push_str(&next);
             self.dirty = true;
+            self.revision += 1;
+            self.revision += 1;
         }
     }
+}
+
+/// Expand tabs to spaces for display.
+pub fn expand_tabs(line: &str, tab_width: usize) -> String {
+    let tab_width = tab_width.max(1);
+    if !line.contains('\t') {
+        return line.to_owned();
+    }
+    let mut out = String::new();
+    let mut col = 0;
+    for c in line.chars() {
+        if c == '\t' {
+            let n = tab_width - (col % tab_width);
+            out.push_str(&" ".repeat(n));
+            col += n;
+        } else {
+            out.push(c);
+            col += unicode_width::UnicodeWidthChar::width(c).unwrap_or(0);
+        }
+    }
+    out
+}
+
+/// Display column of char index `col` in `line` after tab expansion.
+pub fn display_col(line: &str, col: usize, tab_width: usize) -> usize {
+    let prefix: String = line.chars().take(col).collect();
+    unicode_width::UnicodeWidthStr::width(expand_tabs(&prefix, tab_width).as_str())
+}
+
+/// Char index whose cell covers display column `disp` (clamped to the line end).
+pub fn char_col_at(line: &str, disp: usize, tab_width: usize) -> usize {
+    let tab_width = tab_width.max(1);
+    let mut col = 0;
+    for (i, c) in line.chars().enumerate() {
+        let w = if c == '\t' {
+            tab_width - (col % tab_width)
+        } else {
+            unicode_width::UnicodeWidthChar::width(c).unwrap_or(0)
+        };
+        if disp < col + w {
+            return i;
+        }
+        col += w;
+    }
+    line.chars().count()
 }
 
 fn hex_dump(bytes: &[u8]) -> String {
@@ -363,6 +447,39 @@ mod tests {
         b.top();
         b.ensure_visible(10);
         assert_eq!(b.scroll(), 0);
+    }
+
+    #[test]
+    fn display_helpers() {
+        assert_eq!(expand_tabs("a\tb", 4), "a   b");
+        assert_eq!(display_col("a\tb", 2, 4), 4);
+        assert_eq!(display_col("你好", 1, 4), 2);
+        assert_eq!(char_col_at("a\tb", 0, 4), 0);
+        assert_eq!(char_col_at("a\tb", 2, 4), 1);
+        assert_eq!(char_col_at("a\tb", 4, 4), 2);
+        assert_eq!(char_col_at("a\tb", 40, 4), 3);
+        assert_eq!(char_col_at("你好x", 3, 4), 1);
+        assert_eq!(char_col_at("你好x", 4, 4), 2);
+    }
+
+    #[test]
+    fn set_cursor_and_scroll_by() {
+        let mut b = buf(&(0..30)
+            .map(|i| format!("line {i}"))
+            .collect::<Vec<_>>()
+            .join("\n"));
+        b.set_cursor(99, 99);
+        assert_eq!(b.cursor(), (29, 7));
+        b.set_cursor(3, 2);
+        b.scroll_by(10, 5);
+        assert_eq!(b.scroll(), 10);
+        assert_eq!(b.cursor().0, 10);
+        b.scroll_by(-100, 5);
+        assert_eq!(b.scroll(), 0);
+        assert_eq!(b.cursor().0, 4);
+        let r = b.revision();
+        b.insert_char('x');
+        assert_eq!(b.revision(), r + 1);
     }
 
     #[test]

@@ -6,7 +6,10 @@ use std::process::Command;
 use std::sync::mpsc::Receiver;
 use std::time::{Duration, Instant};
 
-use crossterm::event::{Event, KeyCode, KeyEvent, KeyModifiers};
+use crossterm::event::{
+    Event, KeyCode, KeyEvent, KeyModifiers, MouseButton, MouseEvent, MouseEventKind,
+};
+use ratatui::layout::Rect;
 
 use crate::config::{ShellConfig, TaskSource, VendorBuild, Workspace};
 
@@ -127,6 +130,105 @@ impl Harness {
         }
         pred(&self.app)
     }
+}
+
+fn click(col: u16, row: u16) -> MouseEvent {
+    MouseEvent {
+        kind: MouseEventKind::Down(MouseButton::Left),
+        column: col,
+        row,
+        modifiers: KeyModifiers::NONE,
+    }
+}
+
+fn wheel(col: u16, row: u16, down: bool) -> MouseEvent {
+    let kind = if down {
+        MouseEventKind::ScrollDown
+    } else {
+        MouseEventKind::ScrollUp
+    };
+    MouseEvent {
+        kind,
+        column: col,
+        row,
+        modifiers: KeyModifiers::NONE,
+    }
+}
+
+impl Harness {
+    fn mouse(&mut self, m: MouseEvent) {
+        self.app.handle(AppEvent::Input(Event::Mouse(m)));
+    }
+}
+
+#[test]
+fn mouse_in_task_list_selects_and_double_click_opens() {
+    let mut h = Harness::new(true);
+    // Pretend the list was drawn at the top-left; rows: PLANNED, alpha, DOING, beta.
+    h.app.ui.task_list = Rect::new(0, 0, 22, 20);
+    h.mouse(click(3, 4));
+    assert_eq!(selected_task(&h.app).as_deref(), Some("beta"));
+    h.mouse(click(3, 1)); // header row: selection unchanged
+    assert_eq!(selected_task(&h.app).as_deref(), Some("beta"));
+    h.mouse(wheel(3, 3, false));
+    assert_eq!(selected_task(&h.app).as_deref(), Some("alpha"));
+    h.mouse(click(3, 4));
+    h.mouse(click(3, 4));
+    assert!(matches!(h.app.mode(), Mode::Task));
+    assert_eq!(h.app.active_task(), Some("beta"));
+    h.mouse(click(50, 50)); // outside everything: ignored
+}
+
+#[test]
+fn mouse_in_task_view_focuses_selects_and_scrolls() {
+    let mut h = Harness::new(true);
+    h.press(key(KeyCode::Enter));
+    h.app.ui.tree = Rect::new(0, 1, 22, 10);
+    h.app.ui.shells = Rect::new(0, 11, 22, 8);
+    h.app.ui.editor = Rect::new(24, 1, 60, 10);
+    h.app.ui.editor_gutter = 3;
+    // Double-click the folder expands it; then double-click the file opens it.
+    h.mouse(click(3, 2));
+    h.mouse(click(3, 2));
+    assert!(h.ctx().tree.nodes().iter().any(|n| n.name == "run.sh"));
+    h.mouse(click(3, 3));
+    assert_eq!(h.ctx().tree.selected().unwrap().name, "run.sh");
+    h.mouse(click(3, 3));
+    assert!(h.ctx().editor.as_ref().unwrap().path().ends_with("run.sh"));
+    assert_eq!(h.ctx().focus, Focus::Editor);
+    // Click inside the editor places the cursor.
+    h.mouse(click(24 + 3 + 4, 1));
+    assert_eq!(h.ctx().editor.as_ref().unwrap().cursor(), (0, 4));
+    h.mouse(click(24 + 3 + 40, 1));
+    assert_eq!(h.ctx().editor.as_ref().unwrap().cursor(), (0, 7));
+    // Wheel over the tree moves its selection and does not steal focus.
+    h.mouse(wheel(3, 3, false));
+    assert_eq!(h.ctx().tree.selected().unwrap().name, "scripts");
+    assert_eq!(h.ctx().focus, Focus::Editor);
+    // Click on the shells pane focuses it; a shell then appears in the terminal rect.
+    h.mouse(click(3, 12));
+    assert_eq!(h.ctx().focus, Focus::Shells);
+    h.press(key(KeyCode::Char('n')));
+    assert_eq!(h.ctx().focus, Focus::Terminal);
+    h.app.ui.terminal = Rect::new(24, 12, 60, 8);
+    h.mouse(click(3, 2));
+    assert_eq!(h.ctx().focus, Focus::Tree);
+    h.mouse(click(30, 14));
+    assert_eq!(h.ctx().focus, Focus::Terminal);
+    // Wheel over the terminal without a mouse-aware program scrolls the pane, harmlessly.
+    h.mouse(wheel(30, 14, true));
+    h.app.shutdown();
+}
+
+#[test]
+fn mouse_on_settings_page_selects_rows() {
+    let mut h = Harness::new(true);
+    h.press(key(KeyCode::Char(',')));
+    h.app.ui.config_rows = Rect::new(1, 1, 80, 20);
+    h.mouse(click(5, 3));
+    assert!(matches!(h.app.mode(), Mode::Config(f) if f.selected() == 2));
+    h.mouse(wheel(5, 3, true));
+    assert!(matches!(h.app.mode(), Mode::Config(f) if f.selected() == 3));
 }
 
 fn selected_task(app: &App) -> Option<String> {

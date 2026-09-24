@@ -3,7 +3,7 @@
 use ratatui::layout::Rect;
 use ratatui::style::{Modifier, Style};
 use ratatui::text::{Line, Span};
-use ratatui::widgets::{Block, List, ListItem, ListState};
+use ratatui::widgets::{Block, List, ListItem};
 use ratatui::Frame;
 
 use crate::app::{App, ListRow};
@@ -11,7 +11,7 @@ use crate::app::{App, ListRow};
 use super::Theme;
 
 /// Draw the categorised task list into `area`.
-pub fn draw(frame: &mut Frame<'_>, app: &App, area: Rect, theme: &Theme, focused: bool) {
+pub fn draw(frame: &mut Frame<'_>, app: &mut App, area: Rect, theme: &Theme, focused: bool) {
     let rows = app.rows();
     let store = app.store();
     let items: Vec<ListItem<'_>> = rows
@@ -53,11 +53,10 @@ pub fn draw(frame: &mut Frame<'_>, app: &App, area: Rect, theme: &Theme, focused
     let list = List::new(items)
         .block(block)
         .highlight_style(theme.selected(focused));
-    let mut state = ListState::default();
-    if !rows.is_empty() {
-        state.select(Some(app.list_selected().min(rows.len() - 1)));
-    }
-    frame.render_stateful_widget(list, area, &mut state);
+    let selected = (!rows.is_empty()).then(|| app.list_selected().min(rows.len() - 1));
+    app.ui.task_list = area;
+    app.ui.task_list_state.select(selected);
+    frame.render_stateful_widget(list, area, &mut app.ui.task_list_state);
 
     if rows.iter().all(|r| matches!(r, ListRow::Header(_))) {
         let hint = Rect {

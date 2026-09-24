@@ -6,6 +6,7 @@ use std::path::{Path, PathBuf};
 use crate::config::Config;
 use crate::editor::Buffer;
 use crate::files::FileTree;
+use crate::highlight::{Language, State};
 use crate::tasks::context::{read_meta, write_meta};
 use crate::tasks::{TaskMeta, TaskSummary};
 use crate::terminal::shellrc::{self, TaskEnv};
@@ -46,6 +47,19 @@ impl Shell {
     }
 }
 
+/// Cached highlight states for the open document.
+#[derive(Debug, Clone)]
+pub struct HighlightCache {
+    /// Document the cache belongs to.
+    pub path: PathBuf,
+    /// Buffer revision the states were computed for.
+    pub revision: u64,
+    /// Detected language.
+    pub language: Language,
+    /// State before each line (see [`Language::line_states`]).
+    pub states: Vec<State>,
+}
+
 /// Everything pahiri remembers about an opened task while it runs.
 #[derive(Debug)]
 pub struct TaskContext {
@@ -73,6 +87,8 @@ pub struct TaskContext {
     pub zoomed: bool,
     /// Per-task env file consumed by the `cd` wrapper.
     pub env_file: Option<PathBuf>,
+    /// Highlight cache for the open document.
+    pub highlight: Option<HighlightCache>,
     next_number: usize,
 }
 
@@ -94,6 +110,7 @@ impl TaskContext {
             show_shell: true,
             zoomed: false,
             env_file: None,
+            highlight: None,
             next_number: 1,
         })
     }
@@ -174,6 +191,31 @@ impl TaskContext {
         self.show_shell = true;
         self.focus = Focus::Terminal;
         Ok(())
+    }
+
+    /// Bring the highlight cache up to date with the open document.
+    pub fn refresh_highlight(&mut self) {
+        let Some(ed) = &self.editor else {
+            self.highlight = None;
+            return;
+        };
+        let up_to_date = self
+            .highlight
+            .as_ref()
+            .is_some_and(|h| h.path == ed.path() && h.revision == ed.revision());
+        if up_to_date {
+            return;
+        }
+        let language = match &self.highlight {
+            Some(h) if h.path == ed.path() => Some(h.language),
+            _ => Language::detect(ed.path(), ed.lines().first().map_or("", String::as_str)),
+        };
+        self.highlight = language.map(|language| HighlightCache {
+            path: ed.path().to_path_buf(),
+            revision: ed.revision(),
+            language,
+            states: language.line_states(ed.lines()),
+        });
     }
 
     /// Whether the terminal pane should be drawn.

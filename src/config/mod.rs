@@ -177,6 +177,11 @@ pub struct Config {
     pub status_file: String,
     /// File that every task folder is expected to contain.
     pub context_file: String,
+    /// Capture the mouse (click to focus/select, wheel to scroll, forwarded to programs
+    /// that ask for it). Hold Shift to select text with the terminal emulator instead.
+    pub mouse: bool,
+    /// Syntax highlighting in the editor.
+    pub syntax_highlighting: bool,
     /// Branch name used as "main" for workspaces that do not set their own.
     pub default_main_branch: String,
     /// Code checkouts available for attaching to tasks.
@@ -202,6 +207,8 @@ impl Default for Config {
             scrollback_lines: 5000,
             status_file: "status.md".into(),
             context_file: "CONTEXT.md".into(),
+            mouse: true,
+            syntax_highlighting: true,
             default_main_branch: "main".into(),
             workspaces: Vec::new(),
             builds: Vec::new(),

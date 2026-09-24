@@ -158,6 +158,11 @@ impl FileTree {
         self.selected = self.nodes.len().saturating_sub(1);
     }
 
+    /// Select row `index` (clamped).
+    pub fn select_index(&mut self, index: usize) {
+        self.selected = index.min(self.nodes.len().saturating_sub(1));
+    }
+
     /// Select the row for `path`, if visible.
     pub fn select_path(&mut self, path: &Path) {
         if let Some(i) = self.nodes.iter().position(|n| n.path == path) {
