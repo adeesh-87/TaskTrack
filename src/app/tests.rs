@@ -697,3 +697,354 @@ fn helpers() {
     assert_eq!(format_rfc3339(1_700_000_000), "2023-11-14T22:13:20Z");
     assert_eq!(format_rfc3339(1_709_164_800), "2024-02-29T00:00:00Z");
 }
+
+// ----- deleting, timer, checkpoints, agents, gerrit ---------------------------------
+
+const PLAN: &str = "# alpha\n\n## Checkpoints\n<!-- pahiri:checkpoints -->\n- [ ] Read the spec (20m)\n- [ ] Write the code (1h)\n<!-- /pahiri:checkpoints -->\n";
+
+fn popup_title(app: &App) -> String {
+    app.popup()
+        .map(|p| p.title().to_owned())
+        .unwrap_or_default()
+}
+
+#[test]
+fn delete_task_moves_it_to_trash() {
+    let mut h = Harness::new(true);
+    assert_eq!(selected_task(&h.app).as_deref(), Some("alpha"));
+    h.press(key(KeyCode::Char('d')));
+    assert!(popup_title(&h.app).starts_with("Delete task"));
+    h.press(key(KeyCode::Char('n')));
+    assert!(h.tasks.join("alpha").is_dir());
+    h.press(key(KeyCode::Char('d')));
+    h.press(key(KeyCode::Char('y')));
+    assert!(!h.tasks.join("alpha").exists());
+    assert!(fs::read_dir(h.tasks.join(".trash")).unwrap().count() == 1);
+    assert_eq!(selected_task(&h.app).as_deref(), Some("beta"));
+    assert!(h.app.store().unwrap().board().locate("alpha").is_none());
+
+    // Inside a task with a running shell: refused; after closing it, deleted
+    // and back on the list.
+    h.press(key(KeyCode::Enter));
+    h.press(key(KeyCode::Char('t')));
+    h.press(ctrl('b'));
+    h.press(key(KeyCode::Esc));
+    h.press(key(KeyCode::Char('D')));
+    assert!(
+        matches!(h.app.popup(), Some(Popup::Message { body, .. }) if body.contains("running shell"))
+    );
+    h.press(key(KeyCode::Enter));
+    h.app.shutdown();
+    let ctx = h.app.contexts.get_mut("beta").unwrap();
+    ctx.shells.clear();
+    ctx.focus = Focus::Tree;
+    h.press(key(KeyCode::Esc));
+    h.press(key(KeyCode::Char('D')));
+    h.press(key(KeyCode::Char('y')));
+    assert!(matches!(h.app.mode(), Mode::TaskList));
+    assert!(!h.tasks.join("beta").exists());
+}
+
+#[test]
+fn timer_runs_checkpoints_books_time_and_alarms() {
+    let mut h = Harness::build(true, |cfg| {
+        cfg.categories = vec!["Planned".into(), "Doing".into(), "Done".into()];
+    });
+    fs::write(h.tasks.join("alpha/CONTEXT.md"), PLAN).unwrap();
+    h.app.refresh_next_up();
+    assert_eq!(h.app.next_up().len(), 2);
+    // Start on the first open checkpoint from the list; the task moves to Doing.
+    h.press(key(KeyCode::Char('m')));
+    let t = h.app.timer().expect("timer");
+    assert_eq!(t.checkpoint.as_deref(), Some("Read the spec"));
+    assert_eq!(t.budget, Duration::from_secs(20 * 60));
+    assert_eq!(
+        h.app.store().unwrap().board().locate("alpha").map(|l| l.0),
+        Some(1)
+    );
+    assert!(h.context_md("alpha").contains("- started: "));
+
+    // 7 minutes pass, pause books whole minutes to the checkpoint and the task.
+    h.app
+        .timer
+        .as_mut()
+        .unwrap()
+        .backdate(Duration::from_secs(7 * 60 + 20));
+    h.press(key(KeyCode::Char('m')));
+    assert!(!h.app.timer().unwrap().is_running());
+    let md = h.context_md("alpha");
+    assert!(md.contains("- [ ] Read the spec (20m; spent 7m)"), "{md}");
+    assert!(md.contains("- time_spent: 7m"), "{md}");
+    h.press(key(KeyCode::Char('m')));
+    assert!(h.app.timer().unwrap().is_running());
+
+    // Time runs out: flash, bell, and the time's-up choice.
+    h.app
+        .timer
+        .as_mut()
+        .unwrap()
+        .backdate(Duration::from_secs(13 * 60));
+    h.app.handle(AppEvent::Tick);
+    assert!(
+        popup_title(&h.app).starts_with("Time's up"),
+        "{:?}",
+        h.app.popup()
+    );
+    assert!(h.app.take_bell());
+    assert!(h.app.flash_on());
+    assert!(h.app.tick_interval() < Duration::from_millis(250));
+    // "done — start next".
+    h.press(key(KeyCode::Char('1')));
+    let md = h.context_md("alpha");
+    assert!(md.contains("- [x] Read the spec (20m; spent 20m)"), "{md}");
+    assert!(
+        md.contains("✓ Read the spec (spent 20m, estimated 20m)"),
+        "{md}"
+    );
+    assert_eq!(
+        h.app.timer().unwrap().checkpoint.as_deref(),
+        Some("Write the code")
+    );
+
+    // v ticks it and, being the last, stops; M with nothing running just says so.
+    h.press(key(KeyCode::Char('v')));
+    assert!(h.app.timer().is_none());
+    assert!(h.context_md("alpha").contains("- [x] Write the code (1h)"));
+    h.press(key(KeyCode::Char('M')));
+
+    // Moving to the last column records `finished` and asks for an outcome.
+    h.press(key(KeyCode::Char(']')));
+    assert!(matches!(h.app.popup(), Some(Popup::Input { .. })));
+    h.type_str("Shipped the parser");
+    h.press(key(KeyCode::Enter));
+    let md = h.context_md("alpha");
+    assert!(md.contains("- finished: "), "{md}");
+    assert!(md.contains("## Outcome\n- "), "{md}");
+    assert!(md.contains("Shipped the parser"));
+    // Moving back clears `finished`.
+    h.press(key(KeyCode::Char('[')));
+    assert!(!h.context_md("alpha").contains("- finished: "));
+}
+
+#[test]
+fn focus_block_without_checkpoints_and_checkpoint_popup() {
+    let mut h = Harness::new(true);
+    h.press(key(KeyCode::Enter));
+    h.press(key(KeyCode::Esc));
+    h.press(key(KeyCode::Char('m')));
+    assert!(matches!(h.app.popup(), Some(Popup::Input { value, .. }) if value == "25"));
+    h.press(ctrl('u'));
+    h.type_str("10");
+    h.press(key(KeyCode::Enter));
+    assert_eq!(h.app.timer().unwrap().budget, Duration::from_secs(600));
+    h.app
+        .timer
+        .as_mut()
+        .unwrap()
+        .backdate(Duration::from_secs(4 * 60));
+    h.app.shutdown(); // books the time on exit
+    assert!(h.app.timer().is_none());
+    let md = h.context_md("alpha");
+    assert!(md.contains("⏱ 4m focus block"), "{md}");
+    assert!(md.contains("- time_spent: 4m"));
+
+    // The checkpoint popup ticks items and starts the timer on the selected one.
+    fs::write(h.tasks.join("alpha/CONTEXT.md"), PLAN).unwrap();
+    h.app.handle(AppEvent::Tick); // picks up the outside edit
+    assert_eq!(h.ctx().checkpoints.len(), 2);
+    h.press(key(KeyCode::Esc));
+    h.press(key(KeyCode::Char('k')));
+    assert!(matches!(h.app.popup(), Some(Popup::Checkpoints { .. })));
+    h.press(key(KeyCode::Char(' ')));
+    assert!(h.context_md("alpha").contains("- [x] Read the spec (20m)"));
+    h.press(key(KeyCode::Down));
+    h.press(key(KeyCode::Enter));
+    assert_eq!(
+        h.app.timer().unwrap().checkpoint.as_deref(),
+        Some("Write the code")
+    );
+    assert!(h.ctx().plan_summary().contains("Write the code"));
+}
+
+fn fake_agent(cfg: &mut Config, script: &str) {
+    cfg.agent.command = "sh".into();
+    cfg.agent.args = vec![
+        "-c".into(),
+        format!("cat > \"$PAHIRI_TASK_DIR/prompt.txt\"; {script}"),
+    ];
+}
+
+#[test]
+fn agent_writes_context_and_checkpoints() {
+    let mut h = Harness::build(true, |cfg| {
+        fake_agent(
+            cfg,
+            r#"if grep -q 'checklist only' "$PAHIRI_TASK_DIR/prompt.txt"; then printf -- '- [ ] Reproduce (20m)\n- [ ] Fix (45m)\n'; else printf '## Goal\n- make it work\n\nCONTEXT_READY: yes\n'; fi"#,
+        );
+    });
+    h.press(key(KeyCode::Enter));
+    // Checkpoints need a ready context first.
+    h.press(key(KeyCode::Esc));
+    h.press(key(KeyCode::Char('b')));
+    assert_eq!(popup_title(&h.app), "Context not ready yet");
+    h.press(key(KeyCode::Enter));
+
+    h.press(key(KeyCode::Esc));
+    h.press(key(KeyCode::Char('i')));
+    assert!(h.pump_until(|app| matches!(app.popup(), Some(Popup::Log { done: true, .. }))));
+    let md = h.context_md("alpha");
+    assert!(md.contains("## Context\n<!-- pahiri:context -->\n### Goal\n- make it work\n<!-- /pahiri:context -->"), "{md}");
+    assert!(md.contains("- context_ready: true"), "{md}");
+    let prompt = fs::read_to_string(h.tasks.join("alpha/prompt.txt")).unwrap();
+    assert!(prompt.contains("task alpha"), "{prompt}");
+    assert!(prompt.contains("== OUTPUT FORMAT"), "{prompt}");
+    assert!(h.ctx().meta.context_ready);
+    h.press(key(KeyCode::Enter));
+
+    h.press(key(KeyCode::Esc));
+    h.press(key(KeyCode::Char('b')));
+    assert!(h.pump_until(|app| matches!(app.popup(), Some(Popup::Log { done: true, .. }))));
+    assert!(h
+        .context_md("alpha")
+        .contains("- [ ] Reproduce (20m)\n- [ ] Fix (45m)\n"));
+    assert_eq!(h.ctx().checkpoints.len(), 2);
+    h.press(key(KeyCode::Enter));
+
+    // With progress recorded, a new breakdown asks before replacing.
+    h.press(key(KeyCode::Esc));
+    h.press(key(KeyCode::Char('v')));
+    h.press(key(KeyCode::Esc));
+    h.press(key(KeyCode::Char('b')));
+    assert!(h.pump_until(|app| matches!(app.popup(), Some(Popup::Confirm { .. }))));
+    h.press(key(KeyCode::Char('y')));
+    assert!(h.context_md("alpha").contains("- [ ] Reproduce (20m)\n"));
+
+    // Esc r toggles readiness; so does the CLI API.
+    h.press(key(KeyCode::Esc));
+    h.press(key(KeyCode::Char('r')));
+    assert!(!h.ctx().meta.context_ready);
+    crate::cli::task_ready(h.app.config(), "alpha", true).unwrap();
+    h.app.handle(AppEvent::Tick);
+    assert!(h.ctx().meta.context_ready);
+}
+
+#[test]
+fn agent_failures_and_cancel_are_reported() {
+    let mut h = Harness::build(true, |cfg| fake_agent(cfg, "sleep 5"));
+    h.press(key(KeyCode::Enter));
+    h.press(key(KeyCode::Esc));
+    h.press(key(KeyCode::Char('i')));
+    h.press(key(KeyCode::Esc)); // cancel
+    assert!(h.pump_until(|app| matches!(app.popup(), Some(Popup::Log { done: true, lines, .. }) if lines.iter().any(|l| l.contains("cancelled")))));
+    h.press(key(KeyCode::Enter));
+    h.app.config.agent.command = String::new();
+    h.press(key(KeyCode::Esc));
+    h.press(key(KeyCode::Char('i')));
+    assert!(
+        matches!(h.app.popup(), Some(Popup::Message { body, .. }) if body.contains("No AI agent"))
+    );
+}
+
+#[test]
+fn gerrit_changes_are_found_and_recorded() {
+    let fw = tempfile::tempdir().unwrap();
+    make_repo(fw.path());
+    git(fw.path(), &["switch", "-q", "-c", "alpha"]);
+    fs::write(fw.path().join("b.txt"), "b").unwrap();
+    git(fw.path(), &["add", "-A"]);
+    let id = format!("I{}", "b".repeat(40));
+    git(
+        fw.path(),
+        &["commit", "-q", "-m", &format!("Fix it\n\nChange-Id: {id}")],
+    );
+    git(
+        fw.path(),
+        &[
+            "remote",
+            "add",
+            "origin",
+            "ssh://me@review.example.com:29418/fw",
+        ],
+    );
+    let mut h = Harness::build(true, |cfg| {
+        cfg.workspaces = vec![Workspace {
+            name: "fw".into(),
+            path: fw.path().to_path_buf(),
+            main_branch: None,
+        }];
+    });
+    h.press(key(KeyCode::Enter));
+    h.press(key(KeyCode::Esc));
+    h.press(key(KeyCode::Char('a')));
+    h.press(key(KeyCode::Char(' ')));
+    h.press(key(KeyCode::Enter));
+    h.press(key(KeyCode::Esc));
+    h.press(key(KeyCode::Char('g')));
+    assert!(h.pump_until(|app| matches!(app.popup(), Some(Popup::Log { done: true, .. }))));
+    let md = h.context_md("alpha");
+    assert!(
+        md.contains(&format!(
+            "- gerrit: fw {id} https://review.example.com/q/{id} :: Fix it"
+        )),
+        "{md}"
+    );
+    assert_eq!(h.ctx().meta.gerrit.len(), 1);
+}
+
+#[test]
+fn coding_agent_starts_in_a_new_shell() {
+    let mut h = Harness::build(true, |cfg| {
+        cfg.coding_agent.command = "printf".into();
+        cfg.coding_agent.args = vec!["'agent:%s\\n'".into()];
+        cfg.coding_agent.start_in_code = false;
+    });
+    // Leader works from the files pane too: leader a.
+    h.press(key(KeyCode::Enter));
+    h.press(ctrl('b'));
+    h.press(key(KeyCode::Char('a')));
+    assert_eq!(h.ctx().shells.len(), 1);
+    assert!(h.pump_until(|app| {
+        app.active_context()
+            .and_then(TaskContext::active_shell)
+            .is_some_and(|s| {
+                s.session
+                    .screen()
+                    .contents()
+                    .contains("helping with task alpha")
+            })
+    }));
+    let prompt = h.root.join("state/prompts/alpha.coding-agent.md");
+    assert!(fs::read_to_string(prompt).unwrap().contains("task alpha"));
+    h.app.shutdown();
+}
+
+#[test]
+fn settings_help_and_source_test_run() {
+    let mut h = Harness::build(true, |cfg| {
+        cfg.task_sources = vec![TaskSource {
+            name: "jira".into(),
+            command: "printf 'J-1\\tOne\\thttp://j/1\\n'".into(),
+        }];
+    });
+    h.press(key(KeyCode::Char(',')));
+    let Mode::Config(form) = &mut h.app.mode else {
+        panic!()
+    };
+    let idx = form
+        .rows()
+        .iter()
+        .position(|r| matches!(r, config_form::Row::Item { field, .. } if form.fields()[*field].key == config_form::FieldKey::TaskSources))
+        .unwrap();
+    form.select(idx);
+    h.press(key(KeyCode::Char('?')));
+    assert!(
+        matches!(h.app.popup(), Some(Popup::Doc { lines, .. }) if lines.iter().any(|l| l.contains("JSON array")))
+    );
+    h.press(key(KeyCode::Esc));
+    h.press(key(KeyCode::Char('t')));
+    assert!(h.pump_until(|app| matches!(app.popup(), Some(Popup::Doc { .. }))));
+    assert!(
+        matches!(h.app.popup(), Some(Popup::Doc { lines, .. }) if lines.iter().any(|l| l.contains("J-1") && l.contains("One")))
+    );
+    assert!(!h.tasks.join("J-1").exists());
+}

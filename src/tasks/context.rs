@@ -1,8 +1,8 @@
 //! The pahiri-managed block inside a task's `CONTEXT.md`.
 //!
 //! Everything pahiri records about a task (ticket source and link, attached
-//! workspaces and builds, the task branch) lives between two HTML comment
-//! markers so the rest of the file stays free-form:
+//! workspaces and builds, the task branch, timestamps, Gerrit changes) lives
+//! between two HTML comment markers so the rest of the file stays free-form:
 //!
 //! ```markdown
 //! ## Attachments
@@ -13,6 +13,12 @@
 //! - build: yocto-2024
 //! - branch: PROJ-123
 //! - prepared: 2026-09-24T10:00:00Z
+//! - gerrit: firmware I3f2a… https://gerrit/q/I3f2a… :: Fix the flux capacitor
+//! - created: 2026-09-20T08:00:00Z
+//! - started: 2026-09-21T09:30:00Z
+//! - finished: 2026-09-24T17:00:00Z
+//! - time_spent: 215m
+//! - context_ready: true
 //! <!-- pahiri:end -->
 //! ```
 
@@ -27,6 +33,51 @@ pub const BEGIN: &str = "<!-- pahiri:begin -->";
 /// End marker of the managed block.
 pub const END: &str = "<!-- pahiri:end -->";
 const HEADING: &str = "## Attachments";
+
+/// A Gerrit change found on a task branch.
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
+pub struct GerritRef {
+    /// Workspace the commit lives in.
+    pub workspace: String,
+    /// The `Change-Id` trailer.
+    pub change_id: String,
+    /// Review URL (search URL when the change number is unknown).
+    pub url: Option<String>,
+    /// Commit subject.
+    pub subject: String,
+}
+
+impl GerritRef {
+    fn render(&self) -> String {
+        let mut s = format!("{} {}", self.workspace, self.change_id);
+        if let Some(u) = &self.url {
+            s.push(' ');
+            s.push_str(u);
+        }
+        if !self.subject.is_empty() {
+            s.push_str(" :: ");
+            s.push_str(&self.subject);
+        }
+        s
+    }
+
+    fn parse(value: &str) -> Option<Self> {
+        let (head, subject) = match value.split_once(" :: ") {
+            Some((h, s)) => (h, s.trim().to_owned()),
+            None => (value, String::new()),
+        };
+        let mut parts = head.split_whitespace();
+        let workspace = parts.next()?.to_owned();
+        let change_id = parts.next()?.to_owned();
+        let url = parts.next().map(str::to_owned);
+        Some(Self {
+            workspace,
+            change_id,
+            url,
+            subject,
+        })
+    }
+}
 
 /// Machine-readable task metadata.
 #[derive(Debug, Clone, PartialEq, Eq, Default)]
@@ -43,6 +94,18 @@ pub struct TaskMeta {
     pub branch: Option<String>,
     /// When `prepare` last ran (RFC 3339, UTC).
     pub prepared: Option<String>,
+    /// Gerrit changes found on the task branches.
+    pub gerrit: Vec<GerritRef>,
+    /// When the task folder was created.
+    pub created: Option<String>,
+    /// When work started (first timer start or first move out of the first column).
+    pub started: Option<String>,
+    /// When the task was moved to the last column.
+    pub finished: Option<String>,
+    /// Minutes recorded by the checkpoint timer.
+    pub time_spent_min: u64,
+    /// Whether the context is good enough to break the task into checkpoints.
+    pub context_ready: bool,
 }
 
 impl TaskMeta {
@@ -79,6 +142,14 @@ impl TaskMeta {
                 "build" => meta.builds.push(value.to_owned()),
                 "branch" => meta.branch = Some(value.to_owned()),
                 "prepared" => meta.prepared = Some(value.to_owned()),
+                "gerrit" => meta.gerrit.extend(GerritRef::parse(value)),
+                "created" => meta.created = Some(value.to_owned()),
+                "started" => meta.started = Some(value.to_owned()),
+                "finished" => meta.finished = Some(value.to_owned()),
+                "time_spent" => {
+                    meta.time_spent_min = value.trim_end_matches('m').trim().parse().unwrap_or(0);
+                }
+                "context_ready" => meta.context_ready = matches!(value, "true" | "yes" | "1"),
                 _ => {}
             }
         }
@@ -113,6 +184,24 @@ impl TaskMeta {
         }
         if let Some(p) = &self.prepared {
             push("prepared", p);
+        }
+        for g in &self.gerrit {
+            push("gerrit", &g.render());
+        }
+        if let Some(c) = &self.created {
+            push("created", c);
+        }
+        if let Some(s) = &self.started {
+            push("started", s);
+        }
+        if let Some(f) = &self.finished {
+            push("finished", f);
+        }
+        if self.time_spent_min > 0 {
+            push("time_spent", &format!("{}m", self.time_spent_min));
+        }
+        if self.context_ready {
+            push("context_ready", "true");
         }
         out.push_str(END);
         out.push('\n');
@@ -176,8 +265,90 @@ pub fn write_meta(path: &Path, id: &str, meta: &TaskMeta) -> io::Result<()> {
     fs::write(path, meta.apply(&existing))
 }
 
+/// Read-modify-write the metadata of a context file.
+pub fn update_meta(
+    path: &Path,
+    id: &str,
+    edit: impl FnOnce(&mut TaskMeta),
+) -> io::Result<TaskMeta> {
+    let mut meta = read_meta(path)?;
+    edit(&mut meta);
+    write_meta(path, id, &meta)?;
+    Ok(meta)
+}
+
+/// Heading of the timestamped log pahiri (and `pahiri task log`) appends to.
+pub const LOG_HEADING: &str = "## Log";
+/// Heading of the one-line outcomes recorded when a task is finished.
+pub const OUTCOME_HEADING: &str = "## Outcome";
+/// Heading of the generated context section.
+pub const CONTEXT_HEADING: &str = "## Context";
+/// Start marker of the generated context.
+pub const CONTEXT_BEGIN: &str = "<!-- pahiri:context -->";
+/// End marker of the generated context.
+pub const CONTEXT_END: &str = "<!-- /pahiri:context -->";
+
+fn read_or_new(path: &Path, id: &str) -> io::Result<String> {
+    match fs::read_to_string(path) {
+        Ok(t) => Ok(t),
+        Err(e) if e.kind() == io::ErrorKind::NotFound => Ok(format!("# {id}\n")),
+        Err(e) => Err(e),
+    }
+}
+
+/// Append `- <timestamp> <line>` under `heading` (created before the attachments block).
+pub fn append_under(
+    path: &Path,
+    id: &str,
+    heading: &str,
+    timestamp: &str,
+    line: &str,
+) -> io::Result<()> {
+    let text = read_or_new(path, id)?;
+    let item = format!("{} {line}", crate::time::short(timestamp));
+    fs::write(
+        path,
+        super::sections::append_item(&text, heading, &item, &["## Attachments"]),
+    )
+}
+
+/// Append a line to the task log.
+pub fn append_log(path: &Path, id: &str, timestamp: &str, line: &str) -> io::Result<()> {
+    append_under(path, id, LOG_HEADING, timestamp, line)
+}
+
+/// Replace (or add) the generated `## Context` section.
+pub fn write_generated_context(path: &Path, id: &str, body: &str) -> io::Result<()> {
+    let text = read_or_new(path, id)?;
+    let out = super::sections::upsert(
+        &text,
+        CONTEXT_HEADING,
+        CONTEXT_BEGIN,
+        CONTEXT_END,
+        body,
+        &[
+            "## Notes",
+            super::checkpoints::HEADING,
+            LOG_HEADING,
+            "## Attachments",
+        ],
+    );
+    fs::write(path, out)
+}
+
+/// Flip the "context is good enough to plan" switch. The settings page, the
+/// palette and `pahiri task ready` all go through this one function.
+pub fn set_context_ready(path: &Path, id: &str, ready: bool) -> io::Result<TaskMeta> {
+    update_meta(path, id, |m| m.context_ready = ready)
+}
+
 /// Initial `CONTEXT.md` for a new task, optionally seeded from a ticket.
-pub fn render_new(id: &str, source: Option<&str>, ticket: Option<&Ticket>) -> String {
+pub fn render_new(
+    id: &str,
+    source: Option<&str>,
+    ticket: Option<&Ticket>,
+    created: &str,
+) -> String {
     use std::fmt::Write as _;
     let mut out = String::new();
     match ticket {
@@ -205,6 +376,7 @@ pub fn render_new(id: &str, source: Option<&str>, ticket: Option<&Ticket>) -> St
     let meta = TaskMeta {
         source: source.map(str::to_owned).filter(|_| ticket.is_some()),
         link: ticket.map(|t| t.url.clone()).filter(|u| !u.is_empty()),
+        created: Some(created.to_owned()),
         ..TaskMeta::default()
     };
     out.push_str("## Notes\n\n");
@@ -217,12 +389,18 @@ mod tests {
 
     #[test]
     fn parse_and_render_block() {
-        let md = "# T\n\n## Attachments\n<!-- pahiri:begin -->\n- source: jira\n- link: http://x\n- workspace: a\n- workspace: b\n- build: y\n- branch: T\n<!-- pahiri:end -->\n";
+        let md = "# T\n\n## Attachments\n<!-- pahiri:begin -->\n- source: jira\n- link: http://x\n- workspace: a\n- workspace: b\n- build: y\n- branch: T\n- gerrit: a I123 https://g/q/I123 :: Fix it\n- created: 2026-01-01T00:00:00Z\n- time_spent: 42m\n- context_ready: true\n<!-- pahiri:end -->\n";
         let meta = TaskMeta::parse(md);
         assert_eq!(meta.source.as_deref(), Some("jira"));
         assert_eq!(meta.workspaces, vec!["a", "b"]);
         assert_eq!(meta.builds, vec!["y"]);
         assert_eq!(meta.branch.as_deref(), Some("T"));
+        assert_eq!(meta.gerrit.len(), 1);
+        assert_eq!(meta.gerrit[0].change_id, "I123");
+        assert_eq!(meta.gerrit[0].url.as_deref(), Some("https://g/q/I123"));
+        assert_eq!(meta.gerrit[0].subject, "Fix it");
+        assert_eq!(meta.time_spent_min, 42);
+        assert!(meta.context_ready);
         assert_eq!(TaskMeta::parse(&meta.apply("")), meta);
     }
 
@@ -256,12 +434,13 @@ mod tests {
             url: "https://j/PROJ-1".into(),
             description: "Steps\n1. a".into(),
         };
-        let md = render_new("PROJ-1", Some("jira"), Some(&t));
+        let md = render_new("PROJ-1", Some("jira"), Some(&t), "2026-01-01T00:00:00Z");
         assert!(md.starts_with("# PROJ-1: Fix it\n\nSource: jira\nLink: https://j/PROJ-1\n\n## Description\n\nSteps\n1. a\n"));
         let meta = TaskMeta::parse(&md);
         assert_eq!(meta.link.as_deref(), Some("https://j/PROJ-1"));
         assert_eq!(meta.source.as_deref(), Some("jira"));
-        let plain = render_new("custom", None, None);
+        assert_eq!(meta.created.as_deref(), Some("2026-01-01T00:00:00Z"));
+        let plain = render_new("custom", None, None, "2026-01-01T00:00:00Z");
         assert!(plain.starts_with("# custom\n"));
         assert!(TaskMeta::parse(&plain).link.is_none());
     }
@@ -278,5 +457,38 @@ mod tests {
         write_meta(&p, "x", &meta).unwrap();
         assert_eq!(read_meta(&p).unwrap(), meta);
         assert!(fs::read_to_string(&p).unwrap().starts_with("# x\n"));
+        let updated = update_meta(&p, "x", |m| m.context_ready = true).unwrap();
+        assert!(updated.context_ready);
+        assert!(read_meta(&p).unwrap().context_ready);
+    }
+
+    #[test]
+    fn log_context_and_ready() {
+        let dir = tempfile::tempdir().unwrap();
+        let p = dir.path().join("CONTEXT.md");
+        write_meta(
+            &p,
+            "x",
+            &TaskMeta {
+                branch: Some("b".into()),
+                ..TaskMeta::default()
+            },
+        )
+        .unwrap();
+        append_log(&p, "x", "2026-01-02T03:04:05Z", "first").unwrap();
+        append_log(&p, "x", "2026-01-02T03:05:00Z", "second").unwrap();
+        let text = fs::read_to_string(&p).unwrap();
+        assert!(
+            text.contains(
+                "## Log\n- 2026-01-02 03:04 first\n- 2026-01-02 03:05 second\n\n## Attachments\n"
+            ),
+            "{text}"
+        );
+        write_generated_context(&p, "x", "### Goal\n- do it").unwrap();
+        let text = fs::read_to_string(&p).unwrap();
+        assert!(text.contains("## Context\n<!-- pahiri:context -->\n### Goal\n- do it\n<!-- /pahiri:context -->\n\n## Log"), "{text}");
+        assert!(set_context_ready(&p, "x", true).unwrap().context_ready);
+        assert!(read_meta(&p).unwrap().context_ready);
+        assert_eq!(read_meta(&p).unwrap().branch.as_deref(), Some("b"));
     }
 }

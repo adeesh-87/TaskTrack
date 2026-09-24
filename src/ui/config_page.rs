@@ -164,7 +164,7 @@ pub fn draw(frame: &mut Frame<'_>, app: &mut App, area: Rect, theme: &Theme) {
     let (rows_rect, first_row) = (fields_area, first);
     let field = &form.fields()[form.selected_field()];
     let help_text = match form.selected_row() {
-        Row::Field(_) => field.help.to_owned(),
+        Row::Field(_) => field.help.clone(),
         Row::Item { .. } => format!("{}  (Enter edit · d delete)", field.help),
         Row::Add(_) => format!("{}  (Enter to add)", field.help),
     };

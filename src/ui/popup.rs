@@ -49,6 +49,8 @@ pub fn draw(frame: &mut Frame<'_>, popup: &Popup, area: Rect, theme: &Theme) {
             | Popup::MultiSelect { .. }
             | Popup::Palette(_)
             | Popup::Choose { .. }
+            | Popup::Doc { .. }
+            | Popup::Checkpoints { .. }
     );
     let width = if wide {
         (area.width * 4 / 5).clamp(40.min(area.width), 120.min(area.width))
@@ -56,8 +58,9 @@ pub fn draw(frame: &mut Frame<'_>, popup: &Popup, area: Rect, theme: &Theme) {
         (area.width * 3 / 5).clamp(30.min(area.width), 90.min(area.width))
     };
     let max_list = (area.height as usize).saturating_sub(8).max(3);
-    let is_warning =
-        popup.title().to_uppercase().starts_with("WARNING") || popup.title().starts_with("Delete");
+    let is_warning = popup.title().to_uppercase().starts_with("WARNING")
+        || popup.title().starts_with("Delete")
+        || popup.title().starts_with("Time's up");
     let title_style = if is_warning {
         Style::new().fg(theme.warning).add_modifier(Modifier::BOLD)
     } else {
@@ -174,6 +177,69 @@ pub fn draw(frame: &mut Frame<'_>, popup: &Popup, area: Rect, theme: &Theme) {
             } else {
                 hint("working …", theme)
             });
+            lines
+        }
+        Popup::Doc { lines, scroll, .. } => {
+            let max = max_list + 2;
+            let mut out: Vec<Line<'_>> = lines
+                .iter()
+                .skip(*scroll)
+                .take(max)
+                .map(|l| Line::raw(l.clone()))
+                .collect();
+            out.push(Line::raw(""));
+            let more = lines.len() > scroll + max;
+            out.push(hint(
+                if more || *scroll > 0 {
+                    "↑/↓ PgUp/PgDn scroll · any other key closes"
+                } else {
+                    "press any key"
+                },
+                theme,
+            ));
+            out
+        }
+        Popup::Checkpoints {
+            task_id,
+            items,
+            selected,
+        } => {
+            title = format!(
+                " {task_id} · checkpoints · {} ",
+                crate::tasks::checkpoints::summary(items)
+            );
+            let rows = items.iter().enumerate().map(|(i, c)| {
+                let style = if i == *selected {
+                    sel
+                } else if c.done {
+                    Style::new().fg(theme.muted)
+                } else {
+                    Style::new()
+                };
+                let mark = if c.done { "[x]" } else { "[ ]" };
+                let spent = if c.spent_min > 0 {
+                    format!(
+                        " · spent {}",
+                        crate::tasks::checkpoints::fmt_minutes(c.spent_min)
+                    )
+                } else {
+                    String::new()
+                };
+                Line::styled(
+                    format!(
+                        " {mark} {} ({}{spent})",
+                        c.title,
+                        crate::tasks::checkpoints::fmt_minutes(c.estimate_min)
+                    ),
+                    style,
+                )
+            });
+            let (mut lines, _) = list_lines(rows, *selected, max_list);
+            lines.push(Line::raw(""));
+            lines.push(hint(
+                "Space tick/untick · Enter start the timer on it · Esc close · edit freely in CONTEXT.md",
+                theme,
+            ));
             lines
         }
         Popup::Palette(p) => {

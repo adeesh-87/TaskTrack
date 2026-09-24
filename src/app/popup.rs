@@ -2,7 +2,8 @@
 
 use std::path::PathBuf;
 
-use crate::tasks::Ticket;
+use crate::ai::PromptKind;
+use crate::tasks::{Checkpoint, Ticket};
 use crate::terminal::ShellId;
 
 use super::palette::Action;
@@ -45,6 +46,24 @@ pub enum Pending {
     },
     /// Run a palette action.
     Run(Action),
+    /// Move the task to the trash.
+    DeleteTask(String),
+    /// Start a focus block of the entered minutes on the task.
+    StartFocus(String),
+    /// Tick the timed checkpoint and start the next.
+    TimerDone,
+    /// Add minutes to the timer.
+    TimerExtend(u64),
+    /// Pause the timer.
+    TimerPause,
+    /// Stop the timer and book the time.
+    TimerStop,
+    /// Replace the task's checkpoints.
+    ReplaceCheckpoints(String, Vec<Checkpoint>),
+    /// Record the entered outcome line for the task.
+    Outcome(String),
+    /// Open a prompt template in the editor.
+    EditPrompt(PromptKind),
     /// Nothing (used by cancel options).
     Nothing,
 }
@@ -141,6 +160,24 @@ pub enum Popup {
     },
     /// The command palette.
     Palette(super::palette::Palette),
+    /// Scrollable read-only text.
+    Doc {
+        /// Title.
+        title: String,
+        /// Lines.
+        lines: Vec<String>,
+        /// First visible line.
+        scroll: usize,
+    },
+    /// The checkpoint list of a task.
+    Checkpoints {
+        /// Task id.
+        task_id: String,
+        /// Checkpoints.
+        items: Vec<Checkpoint>,
+        /// Highlighted row.
+        selected: usize,
+    },
 }
 
 impl Popup {
@@ -185,6 +222,15 @@ impl Popup {
         }
     }
 
+    /// Scrollable text popup.
+    pub fn doc(title: impl Into<String>, text: &str) -> Self {
+        Self::Doc {
+            title: title.into(),
+            lines: text.lines().map(str::to_owned).collect(),
+            scroll: 0,
+        }
+    }
+
     /// Log popup.
     pub fn log(title: impl Into<String>) -> Self {
         Self::Log {
@@ -202,9 +248,11 @@ impl Popup {
             | Popup::Input { title, .. }
             | Popup::Choose { title, .. }
             | Popup::MultiSelect { title, .. }
-            | Popup::Log { title, .. } => title,
+            | Popup::Log { title, .. }
+            | Popup::Doc { title, .. } => title,
             Popup::Tickets { source, .. } => source,
             Popup::Palette(_) => "commands",
+            Popup::Checkpoints { .. } => "checkpoints",
         }
     }
 

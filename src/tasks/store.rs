@@ -8,6 +8,9 @@ use thiserror::Error;
 
 use super::Board;
 
+/// Folder inside the tasks folder that deleted tasks are moved to.
+pub const TRASH_DIR: &str = ".trash";
+
 /// Errors from the task store.
 #[derive(Debug, Error)]
 pub enum StoreError {
@@ -134,7 +137,47 @@ impl TaskStore {
 
     /// Create a new task folder with a context file and add it to `column`.
     pub fn create_task(&mut self, id: &str, column: usize) -> Result<TaskSummary, StoreError> {
-        self.create_task_with_context(id, column, &super::context::render_new(id, None, None))
+        let created = crate::time::now_rfc3339();
+        self.create_task_with_context(
+            id,
+            column,
+            &super::context::render_new(id, None, None, &created),
+        )
+    }
+
+    /// Move a task folder to `<tasks>/.trash/<id>-<timestamp>` and drop it from
+    /// the board. Returns where it went (delete it there for good).
+    pub fn trash_task(&mut self, id: &str) -> Result<PathBuf, StoreError> {
+        if !is_valid_id(id) {
+            return Err(StoreError::InvalidId(id.to_owned()));
+        }
+        let dir = self.tasks_dir.join(id);
+        let trash = self.tasks_dir.join(TRASH_DIR);
+        fs::create_dir_all(&trash)
+            .map_err(|e| io_err(format!("creating {}", trash.display()), e))?;
+        let stamp: String = crate::time::now_rfc3339()
+            .chars()
+            .filter(char::is_ascii_digit)
+            .collect();
+        let mut target = trash.join(format!("{id}-{stamp}"));
+        let mut n = 1;
+        while target.exists() {
+            target = trash.join(format!("{id}-{stamp}-{n}"));
+            n += 1;
+        }
+        fs::rename(&dir, &target)
+            .map_err(|e| io_err(format!("moving {} to the trash", dir.display()), e))?;
+        let ids = discover(&self.tasks_dir)?;
+        self.board.reconcile(&ids);
+        self.save()?;
+        Ok(target)
+    }
+
+    /// Current column name of a task.
+    pub fn column_of(&self, id: &str) -> Option<&str> {
+        self.board
+            .locate(id)
+            .map(|(c, _)| self.board.columns[c].name.as_str())
     }
 
     /// Create a task whose context file starts with `context` (e.g. from a ticket).
@@ -247,5 +290,26 @@ mod tests {
         assert!(store.move_task("new-task", 2).unwrap());
         let again = TaskStore::open(dir.path(), "status.md", "CONTEXT.md", &cats()).unwrap();
         assert_eq!(again.board().locate("new-task"), Some((2, 0)));
+    }
+
+    #[test]
+    fn trash_task_moves_folder_and_drops_board_entry() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut store = TaskStore::open(dir.path(), "status.md", "CONTEXT.md", &cats()).unwrap();
+        store.create_task("gone", 1).unwrap();
+        fs::write(dir.path().join("gone/notes.txt"), "x").unwrap();
+        assert_eq!(store.column_of("gone"), Some("Doing"));
+        let target = store.trash_task("gone").unwrap();
+        assert!(!dir.path().join("gone").exists());
+        assert!(target.join("notes.txt").is_file());
+        assert!(target.starts_with(dir.path().join(".trash")));
+        assert!(store.board().locate("gone").is_none());
+        assert!(!fs::read_to_string(dir.path().join("status.md"))
+            .unwrap()
+            .contains("gone"));
+        assert!(matches!(
+            store.trash_task("../oops"),
+            Err(StoreError::InvalidId(_))
+        ));
     }
 }

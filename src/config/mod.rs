@@ -147,6 +147,85 @@ pub struct TaskSource {
     pub command: String,
 }
 
+/// One-shot agent used to generate context and checkpoints.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(default)]
+pub struct AgentConfig {
+    /// Program, e.g. `claude`. Empty disables the AI actions.
+    pub command: String,
+    /// Arguments. An argument containing `{prompt}` receives the prompt;
+    /// without one the prompt is written to the agent's stdin.
+    pub args: Vec<String>,
+    /// Context prompt template (empty: `<config dir>/prompts/context.md`).
+    pub context_prompt: PathBuf,
+    /// Checkpoint prompt template (empty: `<config dir>/prompts/checkpoints.md`).
+    pub checkpoint_prompt: PathBuf,
+    /// Give up after this many seconds.
+    pub timeout_secs: u64,
+    /// Word limit for generated context (at most 1000).
+    pub context_max_words: usize,
+}
+
+impl Default for AgentConfig {
+    fn default() -> Self {
+        Self {
+            command: "claude".into(),
+            args: vec!["-p".into(), "{prompt}".into()],
+            context_prompt: PathBuf::new(),
+            checkpoint_prompt: PathBuf::new(),
+            timeout_secs: 600,
+            context_max_words: 600,
+        }
+    }
+}
+
+/// Interactive coding agent launched in a task shell (`leader a`).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(default)]
+pub struct CodingAgentConfig {
+    /// Program, e.g. `claude`, `codex`, `aider`. Empty disables the shortcut.
+    pub command: String,
+    /// Arguments; `{prompt}` receives the startup prompt, else it is appended.
+    pub args: Vec<String>,
+    /// Startup prompt template (empty: `<config dir>/prompts/coding-agent.md`).
+    pub startup_prompt: PathBuf,
+    /// Start in the first attached code workspace (else the task folder).
+    pub start_in_code: bool,
+}
+
+impl Default for CodingAgentConfig {
+    fn default() -> Self {
+        Self {
+            command: "claude".into(),
+            args: Vec::new(),
+            startup_prompt: PathBuf::new(),
+            start_in_code: true,
+        }
+    }
+}
+
+/// Checkpoint timer.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(default)]
+pub struct TimerConfig {
+    /// Length of a focus block when the task has no checkpoints.
+    pub focus_minutes: u64,
+    /// Flash the whole screen when time is up.
+    pub flash: bool,
+    /// Ring the terminal bell when time is up.
+    pub bell: bool,
+}
+
+impl Default for TimerConfig {
+    fn default() -> Self {
+        Self {
+            focus_minutes: 25,
+            flash: true,
+            bell: true,
+        }
+    }
+}
+
 /// The persisted configuration.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(default)]
@@ -190,6 +269,14 @@ pub struct Config {
     pub builds: Vec<VendorBuild>,
     /// Ticket sources for creating tasks.
     pub task_sources: Vec<TaskSource>,
+    /// Gerrit web URL; empty derives it from each workspace's `origin` remote.
+    pub gerrit_url: String,
+    /// One-shot agent for context and checkpoints.
+    pub agent: AgentConfig,
+    /// Interactive coding agent.
+    pub coding_agent: CodingAgentConfig,
+    /// Checkpoint timer.
+    pub timer: TimerConfig,
 }
 
 impl Default for Config {
@@ -213,6 +300,10 @@ impl Default for Config {
             workspaces: Vec::new(),
             builds: Vec::new(),
             task_sources: Vec::new(),
+            gerrit_url: String::new(),
+            agent: AgentConfig::default(),
+            coding_agent: CodingAgentConfig::default(),
+            timer: TimerConfig::default(),
         }
     }
 }
@@ -348,7 +439,36 @@ impl Config {
                 errors.push(format!("task source {} has no command", t.name));
             }
         }
+        if self.agent.timeout_secs == 0 {
+            errors.push("agent timeout must be at least 1 second".into());
+        }
+        if !(1..=1000).contains(&self.agent.context_max_words) {
+            errors.push("context word limit must be between 1 and 1000".into());
+        }
+        if self.timer.focus_minutes == 0 {
+            errors.push("focus block must be at least 1 minute".into());
+        }
         errors
+    }
+
+    /// Where a prompt template lives: the configured path, or
+    /// `<folder of the config file>/prompts/<name>.md`.
+    pub fn prompt_path(&self, kind: crate::ai::PromptKind, config_path: &Path) -> PathBuf {
+        use crate::ai::PromptKind;
+        let configured = match kind {
+            PromptKind::Context => &self.agent.context_prompt,
+            PromptKind::Checkpoints => &self.agent.checkpoint_prompt,
+            PromptKind::Coding => &self.coding_agent.startup_prompt,
+        };
+        if configured.as_os_str().is_empty() {
+            config_path
+                .parent()
+                .unwrap_or_else(|| Path::new("."))
+                .join("prompts")
+                .join(kind.file_name())
+        } else {
+            Self::expand_tilde(&configured.display().to_string())
+        }
     }
 
     /// The parsed leader key. Falls back to the default when the configured one is invalid.
@@ -493,6 +613,12 @@ mod tests {
         let cfg = Config::load(&path).unwrap().unwrap();
         assert_eq!(cfg.categories, Config::default().categories);
         assert_eq!(cfg.shell.program, "zsh");
+        assert_eq!(cfg.agent.args, vec!["-p", "{prompt}"]);
+        assert_eq!(cfg.timer.focus_minutes, 25);
+        assert_eq!(
+            cfg.prompt_path(crate::ai::PromptKind::Context, &path),
+            dir.path().join("prompts/context.md")
+        );
     }
 
     #[test]

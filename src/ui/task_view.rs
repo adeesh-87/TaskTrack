@@ -16,29 +16,98 @@ use crate::terminal::{cursor_position, TerminalView};
 use super::task_list::shorten;
 use super::Theme;
 
-/// Right-hand placeholder shown in task-list mode.
-pub fn draw_placeholder(frame: &mut Frame<'_>, area: Rect, theme: &Theme) {
-    let block = Block::bordered().border_style(theme.border(false));
+/// Right-hand side in task-list mode: what to do next.
+pub fn draw_next_up(frame: &mut Frame<'_>, app: &App, area: Rect, theme: &Theme) {
+    let block = Block::bordered()
+        .title(Span::styled(" next up ", Style::new().fg(theme.accent)))
+        .border_style(theme.border(false));
     let inner = block.inner(area);
     frame.render_widget(block, area);
-    let lines = vec![
-        Line::styled(
-            "pahiri",
-            Style::new().fg(theme.accent).add_modifier(Modifier::BOLD),
-        ),
-        Line::raw(""),
-        Line::styled(
-            "Select a task on the left and press Enter.",
-            Style::new().fg(theme.muted),
-        ),
-        Line::styled(
-            "Esc opens the command palette (n new task · c settings · q quit).",
-            Style::new().fg(theme.muted),
-        ),
-    ];
-    let height = lines.len() as u16;
-    let rect = super::popup::centered(inner, inner.width.saturating_sub(4).max(1), height);
-    frame.render_widget(Paragraph::new(lines).centered(), rect);
+    let bold = Style::new().fg(theme.header).add_modifier(Modifier::BOLD);
+    let muted = Style::new().fg(theme.muted);
+    let mut lines: Vec<Line<'_>> = Vec::new();
+
+    if let Some(t) = app.timer() {
+        let now = std::time::Instant::now();
+        lines.push(Line::styled(" Now", bold));
+        lines.push(Line::from(vec![
+            Span::styled(
+                format!("  ⏱ {} ", t.task_id),
+                Style::new().fg(theme.accent).add_modifier(Modifier::BOLD),
+            ),
+            Span::raw(format!("{} · {}", t.what(), t.label(now))),
+        ]));
+        lines.push(Line::raw(""));
+    }
+
+    let records = app.next_up();
+    if records.is_empty() {
+        lines.push(Line::styled(" Nothing open.", muted));
+        lines.push(Line::styled(" n creates a task · Esc for commands.", muted));
+    } else {
+        let id_width = records
+            .iter()
+            .map(|r| r.id.chars().count())
+            .max()
+            .unwrap_or(4)
+            .min(18);
+        let mut column = String::new();
+        for r in records {
+            if r.column != column {
+                if !column.is_empty() {
+                    lines.push(Line::raw(""));
+                }
+                column.clone_from(&r.column);
+                lines.push(Line::styled(format!(" {column}"), bold));
+            }
+            let id = shorten(&r.id, id_width);
+            let what = match r.next_checkpoint() {
+                Some(c) => {
+                    let done = r.checkpoints.iter().filter(|c| c.done).count();
+                    vec![
+                        Span::raw(format!("{} ", c.title)),
+                        Span::styled(
+                            format!(
+                                "({}) · {done}/{}",
+                                crate::tasks::checkpoints::fmt_minutes(c.estimate_min),
+                                r.checkpoints.len()
+                            ),
+                            muted,
+                        ),
+                    ]
+                }
+                None if !r.checkpoints.is_empty() => {
+                    vec![Span::styled("all checkpoints done → ] to finish", muted)]
+                }
+                None if r.context_ready => {
+                    vec![Span::styled(
+                        "context ready · Esc b plans checkpoints",
+                        Style::new().fg(theme.warning),
+                    )]
+                }
+                None => vec![Span::styled(
+                    if r.title.is_empty() {
+                        "define it: Esc i writes the context".to_owned()
+                    } else {
+                        format!("{} · Esc i to define it", r.title)
+                    },
+                    muted,
+                )],
+            };
+            let mut spans = vec![Span::styled(
+                format!("  {id:<id_width$}  "),
+                Style::new().fg(theme.accent),
+            )];
+            spans.extend(what);
+            lines.push(Line::from(spans));
+        }
+    }
+    lines.push(Line::raw(""));
+    lines.push(Line::styled(
+        " Enter opens · m starts the timer · v ticks a checkpoint · Esc commands",
+        muted,
+    ));
+    frame.render_widget(Paragraph::new(lines).wrap(Wrap { trim: false }), inner);
 }
 
 /// Left column inside a task: task header, file tree, shell list.
@@ -47,7 +116,13 @@ pub fn draw_sidebar(frame: &mut Frame<'_>, app: &mut App, area: Rect, theme: &Th
         return;
     };
     let summary = ctx.attachment_summary();
-    let header_height = if summary.is_empty() { 1 } else { 2 };
+    let plan = ctx.plan_summary();
+    let plan_lines = if format!(" {plan}").chars().count() > area.width as usize {
+        2
+    } else {
+        1
+    };
+    let header_height = if summary.is_empty() { 1 } else { 2 } + plan_lines;
     let [header, tree_area, shells_area] = Layout::vertical([
         Constraint::Length(header_height),
         Constraint::Percentage(60),
@@ -66,7 +141,22 @@ pub fn draw_sidebar(frame: &mut Frame<'_>, app: &mut App, area: Rect, theme: &Th
             Style::new().fg(theme.muted),
         ));
     }
+    let plan_style = if ctx.checkpoints.is_empty() && !ctx.meta.context_ready {
+        Style::new().fg(theme.warning)
+    } else {
+        Style::new().fg(theme.accent)
+    };
+    let fixed = header_lines.len() as u16;
     frame.render_widget(Paragraph::new(header_lines), header);
+    let plan_area = Rect {
+        y: header.y + fixed,
+        height: header.height.saturating_sub(fixed),
+        ..header
+    };
+    frame.render_widget(
+        Paragraph::new(Line::styled(format!(" {plan}"), plan_style)).wrap(Wrap { trim: false }),
+        plan_area,
+    );
 
     // File tree.
     let focused = ctx.focus == Focus::Tree;

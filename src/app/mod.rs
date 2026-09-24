@@ -9,24 +9,33 @@ pub mod context;
 pub mod event;
 pub mod palette;
 pub mod popup;
+pub mod timer;
 pub mod ui_state;
 
+mod agent;
 mod keymap;
 mod mouse;
+mod work;
 
 use std::collections::HashMap;
+use std::fmt::Write as _;
 use std::path::{Path, PathBuf};
-use std::time::{SystemTime, UNIX_EPOCH};
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::Arc;
+use std::time::Instant;
 
 use crossterm::event::{Event, KeyCode, KeyEvent, KeyEventKind, KeyModifiers};
 use tracing::{info, warn};
 
+use crate::ai::PromptKind;
 use crate::config::keybind::KeyCombo;
 use crate::config::Config;
+use crate::config::TaskSource;
 use crate::editor::Buffer;
 use crate::files::{ops, probe};
 use crate::git::{self, PrepareRequest};
 use crate::tasks::context::render_new;
+use crate::tasks::record::TaskRecord;
 use crate::tasks::{sources, TaskStore, Ticket};
 use crate::terminal::{keys, PtyEvent, ShellId};
 
@@ -36,6 +45,7 @@ pub use self::event::{AppEvent, EventSender, JobEvent};
 pub use self::palette::{Action, Palette};
 pub use self::popup::{CheckItem, Choice, Pending, Popup};
 pub use self::ui_state::UiState;
+pub use crate::time::{format_rfc3339, now_rfc3339};
 
 /// Which top-level screen is showing.
 #[derive(Debug)]
@@ -93,6 +103,12 @@ pub struct App {
     /// Geometry of the last frame, for mouse hit-testing.
     pub ui: UiState,
     last_click: Option<(std::time::Instant, u16, u16)>,
+    timer: Option<timer::Timer>,
+    flash_start: Option<Instant>,
+    bell: bool,
+    /// Cancels the running agent job (Esc in its log popup).
+    job_cancel: Option<Arc<AtomicBool>>,
+    next_up: Vec<TaskRecord>,
 }
 
 impl App {
@@ -137,6 +153,11 @@ impl App {
             config_returns_to_task: false,
             ui: UiState::default(),
             last_click: None,
+            timer: None,
+            flash_start: None,
+            bell: false,
+            job_cancel: None,
+            next_up: Vec::new(),
         };
         if matches!(app.mode, Mode::TaskList) {
             app.open_store();
@@ -245,6 +266,7 @@ impl App {
             Ok(store) => {
                 self.store = Some(store);
                 self.select_first_task();
+                self.refresh_next_up();
             }
             Err(e) => {
                 self.store = None;
@@ -302,8 +324,8 @@ impl App {
             AppEvent::Input(Event::Key(key)) => self.handle_key(key),
             AppEvent::Input(Event::Paste(text)) => self.handle_paste(&text),
             AppEvent::Input(Event::Mouse(m)) => self.handle_mouse(m),
-            AppEvent::Input(Event::Resize(..) | Event::FocusGained | Event::FocusLost)
-            | AppEvent::Tick => {}
+            AppEvent::Input(Event::Resize(..) | Event::FocusGained | Event::FocusLost) => {}
+            AppEvent::Tick => self.on_tick(),
             AppEvent::Pty(PtyEvent::Output { id, data }) => {
                 if let Some(shell) = self.shell_mut(id) {
                     shell.session.process(&data);
@@ -404,12 +426,55 @@ impl App {
                 }
             }
             (KeyCode::Char('c'), KeyModifiers::CONTROL) => self.should_quit = true,
+            (KeyCode::Char('?'), _) | (KeyCode::F(1), _) => self.config_help(),
+            (KeyCode::Char('t'), KeyModifiers::NONE) if self.test_selected_source() => {}
             _ => {
                 if let Mode::Config(form) = &mut self.mode {
                     form.handle_nav_key(key);
                 }
             }
         }
+    }
+
+    fn config_help(&mut self) {
+        use config_form::FieldKey as K;
+        let Mode::Config(form) = &self.mode else {
+            return;
+        };
+        let field = &form.fields()[form.selected_field()];
+        let (title, text) = match field.key {
+            K::TaskSources => (
+                "Task sources · script format",
+                keymap::TASK_SOURCE_HELP.to_owned(),
+            ),
+            K::AgentCommand
+            | K::AgentArgs
+            | K::AgentTimeout
+            | K::ContextWords
+            | K::ContextPrompt
+            | K::CheckpointPrompt
+            | K::CodingCommand
+            | K::CodingArgs
+            | K::CodingPrompt
+            | K::CodingStartInCode => ("AI agents", keymap::AGENT_HELP.to_owned()),
+            _ => (field.label, field.help.clone()),
+        };
+        self.popup = Some(Popup::doc(title, &text));
+    }
+
+    /// `t` on a task-source item: run it now and show what was parsed.
+    fn test_selected_source(&mut self) -> bool {
+        let Mode::Config(form) = &self.mode else {
+            return false;
+        };
+        let Some(item) = form.selected_item(config_form::FieldKey::TaskSources) else {
+            return false;
+        };
+        match config_form::parse_source(&item) {
+            Ok(src) => self.run_source(src, true),
+            Err(e) => self.error(e),
+        }
+        true
     }
 
     fn save_config(&mut self) {
@@ -511,6 +576,14 @@ impl App {
             (KeyCode::Char('['), _) | (KeyCode::Char('<'), _) => self.run_action(Action::MovePrev),
             (KeyCode::Char('n'), _) => self.run_action(Action::NewTask),
             (KeyCode::Char('r'), _) | (KeyCode::F(5), _) => self.refresh_store(),
+            (KeyCode::Char('d'), KeyModifiers::NONE) | (KeyCode::Delete, _) => {
+                self.run_action(Action::DeleteTask);
+            }
+            (KeyCode::Char('D'), _) => self.run_action(Action::DeleteTask),
+            (KeyCode::Char('m'), KeyModifiers::NONE) => self.run_action(Action::Timer),
+            (KeyCode::Char('M'), _) => self.run_action(Action::StopTimer),
+            (KeyCode::Char('v'), KeyModifiers::NONE) => self.run_action(Action::CheckpointDone),
+            (KeyCode::Char('K'), _) => self.run_action(Action::Checkpoints),
             _ => {}
         }
     }
@@ -554,6 +627,7 @@ impl App {
                     .map(|s| s.categories()[target as usize].clone());
                 self.select_task_row(&id);
                 self.set_status(format!("Moved {id} to {}", name.unwrap_or_default()));
+                self.on_task_moved(&id, col, target as usize);
             }
             Ok(false) => {}
             Err(e) => self.error(e.to_string()),
@@ -575,8 +649,8 @@ impl App {
                 Err(e) => self.error(e.to_string()),
             }
         }
-        let rows = self.rows();
-        self.list_selected = self.list_selected.min(rows.len().saturating_sub(1));
+        self.fix_list_selection();
+        self.refresh_next_up();
     }
 
     fn selected_column(&self) -> usize {
@@ -596,6 +670,7 @@ impl App {
         match result {
             Ok(summary) => {
                 self.select_task_row(&summary.id);
+                self.refresh_next_up();
                 self.set_status(format!("Created {}", summary.id));
                 if matches!(self.mode, Mode::Task) {
                     self.enter_task(&summary.id);
@@ -643,6 +718,11 @@ impl App {
             self.error(format!("unknown task source {source}"));
             return;
         };
+        self.run_source(src, false);
+    }
+
+    /// Run a task-source script in the background; `test` only shows the result.
+    fn run_source(&mut self, src: TaskSource, test: bool) {
         let tasks_dir = self.config.tasks_dir.clone();
         let events = self.events.clone();
         let name = src.name.clone();
@@ -657,6 +737,7 @@ impl App {
                 events.send(AppEvent::Job(JobEvent::Tickets {
                     source: name,
                     result,
+                    test,
                 }));
             });
         if let Err(e) = spawned {
@@ -666,7 +747,7 @@ impl App {
 
     fn create_from_ticket(&mut self, source: &str, ticket: &Ticket) {
         let id = ticket.task_id();
-        let context = render_new(&id, Some(source), Some(ticket));
+        let context = render_new(&id, Some(source), Some(ticket), &now_rfc3339());
         self.create_task(&id, Some(context));
     }
 
@@ -701,6 +782,7 @@ impl App {
         if let Some(id) = self.active_task.clone() {
             self.select_task_row(&id);
         }
+        self.refresh_next_up();
     }
 
     fn request_quit(&mut self) {
@@ -782,7 +864,18 @@ impl App {
             }
             Action::Save => self.save_editor(),
             Action::CloseEditor => self.close_editor(),
-            Action::Help => self.popup = Some(Popup::message("Keys", keymap::HELP)),
+            Action::Help => self.popup = Some(Popup::doc("Keys", keymap::HELP)),
+            Action::DeleteTask => self.request_delete_task(),
+            Action::Timer => self.toggle_timer(),
+            Action::StopTimer => self.stop_timer(),
+            Action::CheckpointDone => self.checkpoint_done(),
+            Action::Checkpoints => self.show_checkpoints(),
+            Action::Gerrit => self.find_gerrit(),
+            Action::GenerateContext => self.run_agent(PromptKind::Context),
+            Action::ToggleContextReady => self.toggle_context_ready(),
+            Action::BreakDown => self.run_agent(PromptKind::Checkpoints),
+            Action::CodingAgent => self.launch_coding_agent(),
+            Action::EditPrompts => self.choose_prompt(),
         }
     }
 
@@ -1005,7 +1098,42 @@ impl App {
                     lines.push(line);
                 }
             }
-            JobEvent::Tickets { source, result } => match result {
+            JobEvent::Tickets {
+                source,
+                result,
+                test: true,
+            } => {
+                self.popup = Some(match result {
+                    Ok(tickets) => {
+                        let mut text = format!(
+                            "{} ticket(s) parsed — test run, nothing was created.\n\n",
+                            tickets.len()
+                        );
+                        for t in &tickets {
+                            let _ = writeln!(text, "{:<14} {}", t.task_id(), t.title);
+                            if !t.url.is_empty() {
+                                let _ = writeln!(text, "{:<14} {}", "", t.url);
+                            }
+                        }
+                        Popup::doc(format!("{source} · test"), &text)
+                    }
+                    Err(e) => Popup::doc(
+                        format!("{source} · test failed"),
+                        &format!("{e}\n\n{}", keymap::TASK_SOURCE_HELP),
+                    ),
+                });
+            }
+            JobEvent::Gerrit {
+                task_id,
+                found,
+                scanned,
+            } => self.handle_gerrit(&task_id, found, scanned),
+            JobEvent::Agent {
+                task_id,
+                kind,
+                result,
+            } => self.handle_agent_result(&task_id, kind, result),
+            JobEvent::Tickets { source, result, .. } => match result {
                 Ok(tickets) if tickets.is_empty() => {
                     self.popup = Some(Popup::message(source, "the script returned no tickets"));
                 }
@@ -1068,6 +1196,15 @@ impl App {
         }
         if focus == Focus::Terminal {
             self.handle_terminal_key(key);
+            return;
+        }
+        if self.leader_pending {
+            self.leader_pending = false;
+            self.handle_leader_command(key);
+            return;
+        }
+        if self.leader.matches(&key) {
+            self.leader_pending = true;
             return;
         }
         match (key.code, key.modifiers) {
@@ -1545,6 +1682,9 @@ impl App {
         }
         let next = match (key.code, key.modifiers) {
             (KeyCode::Esc, _) | (KeyCode::Char(':'), _) => Next::Palette,
+            (KeyCode::Char('a'), _) => Next::Action(Action::CodingAgent),
+            (KeyCode::Char('m'), _) => Next::Action(Action::Timer),
+            (KeyCode::Char('v'), _) => Next::Action(Action::CheckpointDone),
             (KeyCode::Char('q'), _) | (KeyCode::Char('d'), _) => {
                 ctx.zoomed = false;
                 ctx.focus = Focus::Shells;
@@ -1607,12 +1747,82 @@ impl App {
         };
         match popup {
             Popup::Message { .. } => {}
-            Popup::Log { title, lines, done } => {
+            Popup::Log {
+                title,
+                mut lines,
+                done,
+            } => {
                 if !done {
-                    // Still running: keep it, ignore keys.
+                    // Still running: keep it; Esc cancels jobs that can be cancelled.
+                    if key.code == KeyCode::Esc {
+                        if let Some(c) = &self.job_cancel {
+                            if !c.swap(true, Ordering::Relaxed) {
+                                lines.push("cancelling …".into());
+                            }
+                        }
+                    }
                     self.popup = Some(Popup::Log { title, lines, done });
                 }
             }
+            Popup::Doc {
+                title,
+                lines,
+                mut scroll,
+            } => {
+                let max = lines.len().saturating_sub(1);
+                let step = match key.code {
+                    KeyCode::Down | KeyCode::Char('j') => Some(1i64),
+                    KeyCode::Up | KeyCode::Char('k') => Some(-1),
+                    KeyCode::PageDown | KeyCode::Char(' ') => Some(10),
+                    KeyCode::PageUp => Some(-10),
+                    KeyCode::Home | KeyCode::Char('g') => Some(-(max as i64)),
+                    KeyCode::End | KeyCode::Char('G') => Some(max as i64),
+                    _ => None,
+                };
+                if let Some(d) = step {
+                    scroll = (scroll as i64 + d).clamp(0, max as i64) as usize;
+                    self.popup = Some(Popup::Doc {
+                        title,
+                        lines,
+                        scroll,
+                    });
+                }
+            }
+            Popup::Checkpoints {
+                task_id,
+                mut items,
+                mut selected,
+            } => match key.code {
+                KeyCode::Esc | KeyCode::Char('q') => {}
+                KeyCode::Enter | KeyCode::Char('m') => {
+                    if let Some(c) = items.get(selected).filter(|c| !c.done) {
+                        let title = c.title.clone();
+                        self.start_timer(&task_id, Some(&title));
+                    } else {
+                        self.popup = Some(Popup::Checkpoints {
+                            task_id,
+                            items,
+                            selected,
+                        });
+                    }
+                }
+                KeyCode::Char(' ' | 'x' | 'v') => {
+                    self.toggle_checkpoint(&task_id, &mut items, selected);
+                    self.popup = Some(Popup::Checkpoints {
+                        task_id,
+                        items,
+                        selected,
+                    });
+                }
+                code => {
+                    step_selection(&mut selected, items.len(), code);
+                    self.popup = Some(Popup::Checkpoints {
+                        task_id,
+                        items,
+                        selected,
+                    });
+                }
+            },
             Popup::Confirm {
                 title,
                 body,
@@ -1945,6 +2155,23 @@ impl App {
             }
             Pending::RunPrepare { commit_on_main } => self.run_prepare(commit_on_main),
             Pending::Run(action) => self.run_action(action),
+            Pending::DeleteTask(id) => self.delete_task(&id),
+            Pending::StartFocus(id) => {
+                if let Some(m) = input {
+                    self.start_focus(&id, &m);
+                }
+            }
+            Pending::TimerDone => self.checkpoint_done(),
+            Pending::TimerExtend(m) => self.extend_timer(m),
+            Pending::TimerPause => self.pause_timer(),
+            Pending::TimerStop => self.stop_timer(),
+            Pending::ReplaceCheckpoints(id, items) => self.replace_checkpoints(&id, &items),
+            Pending::Outcome(id) => {
+                if let Some(line) = input {
+                    self.record_outcome(&id, &line);
+                }
+            }
+            Pending::EditPrompt(kind) => self.edit_prompt(kind),
         }
     }
 
@@ -1968,8 +2195,12 @@ impl App {
         }
     }
 
-    /// Kill all shells before exit.
+    /// Book the running timer and kill all shells before exit.
     pub fn shutdown(&mut self) {
+        if self.timer.is_some() {
+            self.book_time(true, false);
+            self.timer = None;
+        }
         for ctx in self.contexts.values_mut() {
             ctx.shells.clear();
         }
@@ -2021,38 +2252,6 @@ pub fn human_size(bytes: u64) -> String {
     } else {
         format!("{size:.1} {}", UNITS[unit])
     }
-}
-
-/// Current time as `YYYY-MM-DDTHH:MM:SSZ` without pulling in a date crate.
-pub fn now_rfc3339() -> String {
-    let secs = SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .map(|d| d.as_secs())
-        .unwrap_or(0);
-    format_rfc3339(secs)
-}
-
-/// Format seconds since the Unix epoch as RFC 3339 UTC.
-pub fn format_rfc3339(secs: u64) -> String {
-    let days = (secs / 86_400) as i64;
-    let rem = secs % 86_400;
-    // Howard Hinnant's civil-from-days.
-    let z = days + 719_468;
-    let era = z.div_euclid(146_097);
-    let doe = z.rem_euclid(146_097);
-    let yoe = (doe - doe / 1460 + doe / 36_524 - doe / 146_096) / 365;
-    let y = yoe + era * 400;
-    let doy = doe - (365 * yoe + yoe / 4 - yoe / 100);
-    let mp = (5 * doy + 2) / 153;
-    let d = doy - (153 * mp + 2) / 5 + 1;
-    let m = if mp < 10 { mp + 3 } else { mp - 9 };
-    let y = if m <= 2 { y + 1 } else { y };
-    format!(
-        "{y:04}-{m:02}-{d:02}T{:02}:{:02}:{:02}Z",
-        rem / 3600,
-        (rem % 3600) / 60,
-        rem % 60
-    )
 }
 
 #[cfg(test)]
