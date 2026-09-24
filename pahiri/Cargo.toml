@@ -1,0 +1,60 @@
+[package]
+name = "pahiri"
+version = "0.1.0"
+edition = "2021"
+rust-version = "1.80"
+description = "A terminal task execution and management workspace: tasks on the left, files and shells on the right."
+license = "MIT"
+readme = "README.md"
+keywords = ["tui", "tasks", "terminal", "pty"]
+categories = ["command-line-utilities"]
+
+[[bin]]
+name = "pahiri"
+path = "src/main.rs"
+
+[lib]
+name = "pahiri"
+path = "src/lib.rs"
+
+[dependencies]
+anyhow = "1.0"
+clap = { version = "4.5", features = ["derive"] }
+crossterm = "0.29"
+directories = "6.0"
+portable-pty = "0.9"
+ratatui = "0.30"
+serde = { version = "1.0", features = ["derive"] }
+thiserror = "2.0"
+toml = "1.1"
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+unicode-width = "0.2"
+vt100 = "0.16"
+
+[dev-dependencies]
+tempfile = "3.20"
+
+[profile.release]
+lto = "thin"
+codegen-units = 1
+strip = true
+
+[lints.rust]
+unsafe_code = "forbid"
+missing_docs = "warn"
+
+[lints.clippy]
+all = { level = "warn", priority = -1 }
+pedantic = { level = "warn", priority = -1 }
+module_name_repetitions = "allow"
+unnested_or_patterns = "allow"
+must_use_candidate = "allow"
+missing_errors_doc = "allow"
+missing_panics_doc = "allow"
+cast_possible_truncation = "allow"
+cast_sign_loss = "allow"
+cast_possible_wrap = "allow"
+cast_precision_loss = "allow"
+struct_excessive_bools = "allow"
+too_many_lines = "allow"
