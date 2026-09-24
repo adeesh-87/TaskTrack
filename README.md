@@ -55,13 +55,16 @@ filter, `Enter` to run, `Esc` to close.
 | key | command |
 | --- | ------- |
 | `k` | checkpoints (tick with Space, Enter starts the timer on one) |
-| `m` / `M` | timer: start · pause · resume / stop and book the time |
+| `m` / `M` | timer menu (start · pause · resume · done → next · +5/+15 · stop) / stop and book |
 | `v` | checkpoint done → timer moves on to the next |
 | `i` | AI: write the task context (≤ word limit) and judge if it is ready |
 | `r` | context ready: toggle |
 | `b` | AI: break the task into checkpoints (needs a ready context) |
 | `l` | launch the coding agent in a new shell (also `leader a`) |
-| `g` | find Gerrit changes on the task branches |
+| `g` | Gerrit: find changes on the task branches (+ their status) |
+| `P` / `R` | Gerrit: push for review / rebase the task branches onto main |
+| `O` | record a one-line outcome (for reviews) |
+| `F` | find in the editor (F3 / Ctrl+G: next) |
 | `E` | edit the AI prompt templates |
 | `D` | delete the task (moved to `.trash`) |
 | `T` | back to the task list |
@@ -74,7 +77,7 @@ filter, `Enter` to run, `Esc` to close.
 | `[` `]` | move the task to the previous / next category |
 | `n` | new task (custom, or from a task source such as Jira or Orbit) |
 | `c` | configuration |
-| `h` | help |
+| `h` | the help page (also `F1`, `?`) |
 | `q` | quit |
 
 ### Panes and shells
@@ -99,6 +102,16 @@ Shells run on a pseudo-terminal parsed by a VT emulator and painted into the
 pane, so a shell — or a full-screen agent CLI started from it — can never
 take over the screen. Full-screen programs simply see a terminal the size of
 the pane; `leader z` gives them the whole screen.
+
+After a restart pahiri reopens each task's shells in the folders they
+were in (setting *Restore shells*). With *Shells in tmux* every shell runs
+in its own tmux session on a private socket (`tmux -L pahiri ls`), so the
+programs in it keep running while pahiri is closed and are reattached
+next time; closing a shell in pahiri ends its session.
+
+Keys can be changed in `[keys]`: `"palette.<action>" = "x"` for palette
+letters and `"leader.<command>" = "x"` for leader commands; the help page
+lists every name next to its current key.
 
 Every shell starts in the task folder with `PAHIRI_TASK`, `PAHIRI_TASK_DIR`,
 `PAHIRI_CODE_DIR(S)` and `PAHIRI_BUILD_DIR(S)` set, and (for zsh and bash) a
@@ -134,12 +147,23 @@ files (timestamps, `ERROR`/`WARN`/`INFO`/`DEBUG` levels, `key=value` pairs,
 lexers are small and hand-written (no grammar files, instant startup) and
 follow the colour scheme. `syntax_highlighting = false` turns it off.
 
+## Help page
+
+`F1` (or `?`, `Esc h`, `leader ?` in a shell) opens a tabbed help page:
+keys (with your overrides), timer and work, AI agents and prompt
+placeholders, **hooks** (events, variables, what you configured and the
+last runs with their output), the **Jira / Orbit** script format, the
+**Gerrit** status format, the CLI, the files pahiri writes, and
+troubleshooting. `?` on a setting opens the matching tab.
+
 ## Doing the work
 
 pahiri's job is that you always know what to do next.
 
-* **Next up.** The task list's right side shows, per open column, each
-  task's next checkpoint (or what it is missing: a context, a plan).
+* **Next up / Today.** The task list's right side shows the time booked
+  today and this week, what you finished, your estimate factor (spent ÷
+  estimated), and each open task's next checkpoint (or what it is
+  missing: a context, a plan). `J`/`K` reorder tasks within a column.
 * **Context → ready → checkpoints.** `Esc i` asks your AI agent to write a
   short `## Context` for the task (goal, background, done-when, risks,
   review notes) from `CONTEXT.md` and the attached code, capped at the word
@@ -148,19 +172,53 @@ pahiri's job is that you always know what to do next.
   `Esc r`, and scripts/agents with `pahiri task ready` — all three go
   through the same function. With a ready context, `Esc b` breaks the task
   into checkpoints: `- [ ] step (40m)`, written to `## Checkpoints`.
-* **Timer.** `m` starts a countdown on the next open checkpoint (its
-  estimate minus time already spent), shown in the status bar everywhere.
-  When it runs out the whole screen flashes, the bell rings, and you
-  choose: done → next checkpoint, +5 / +15 min, keep going (overtime
-  counts), pause, stop. `v` ticks the checkpoint and moves the timer on.
+* **The timer chip.** The bottom-right corner always shows the timer:
+  what is timed and the time left. Click it — or `Esc m` / `leader m` — for
+  the timer menu: start, pause, resume, done → next checkpoint, +5 / +15
+  min, stop. `v` ticks the current checkpoint and moves the timer on.
   Tasks without checkpoints get a focus block (25 min by default).
-* **Accounting.** Minutes are booked to the checkpoint (`spent 25m`) and
-  the task (`time_spent`), with a `## Log` line per session and per ticked
-  checkpoint. pahiri records `created`, `started` (first timer / moved out
-  of the first column — which it does for you when you start the timer)
-  and `finished` (moved to the last column, where it asks for a one-line
-  outcome). That is what `pahiri report` and the `task-retro` skill use
-  for reviews.
+* **Time's up** never takes your keys: the screen flashes, the bell rings,
+  the chip blinks `TIME'S UP` until you open the menu yourself, and the
+  `timer_expire` hook runs (use it for a desktop notification). Overtime
+  keeps counting.
+* **Idle and restarts.** No key press or click for 15 minutes pauses the
+  timer at your last input; when you resume from the menu you choose
+  whether the time away counts. Quitting keeps the timer: it comes back
+  paused and offers the time pahiri was closed.
+* **Accounting.** Minutes are booked to the checkpoint (`spent 25m`), the
+  task (`time_spent`) and `<tasks>/timelog.tsv` (one line per booking),
+  with a `## Log` line per session and per ticked checkpoint. pahiri
+  records `created`, `started` (first timer / moved out of the first
+  column) and `finished` (moved to the last column). `Esc O` adds a
+  one-line outcome. That is what `pahiri report` and the `task-retro`
+  skill use for reviews. Finished tasks older than 14 days are archived
+  from the list (`A` shows them); `/` filters by id or title.
+
+## Hooks
+
+pahiri runs your scripts when things happen — no behaviour is baked in
+that a hook can do instead. Configure `event = command` on the settings
+page or in the config:
+
+```toml
+[hooks]
+task_enter   = "~/bin/pahiri-enter.sh"            # waited for, then the task view is drawn
+timer_expire = "notify-send pahiri \"$PAHIRI_CHECKPOINT: time is up\""
+timer_start  = "~/src/pahiri/examples/hooks/start-moves-task.sh"
+```
+
+Events: `startup`, `task_create`, `task_enter`, `task_leave`,
+`task_move`, `task_delete`, `attach`, `prepare_done`, `timer_start`,
+`timer_pause`, `timer_resume`, `timer_stop`, `timer_expire`,
+`checkpoint_done`, `context_generated`, `checkpoints_generated`, `gerrit`.
+Every hook gets `PAHIRI_TASK`, `PAHIRI_TASK_DIR`, `PAHIRI_CONTEXT_FILE`,
+`PAHIRI_COLUMN`, `PAHIRI_CODE_DIR(S)`, `PAHIRI_BIN` and more; each event
+adds its own (e.g. `PAHIRI_FROM_COLUMN` / `PAHIRI_FINISHED` for
+`task_move`). The help page's Hooks tab lists all of them. `task_enter`
+and `task_create` are waited for; the rest run in the background. Hooks
+talk back through files and `$PAHIRI_BIN task …`; pahiri picks up changes
+to the board, the task folders, `CONTEXT.md` and the file tree within a
+second. Ready-made ones are in `examples/hooks/`.
 
 ## AI agents
 
@@ -168,7 +226,7 @@ Two kinds, both configured on the settings page (`?` there explains):
 
 | | one-shot agent (`Esc i`, `Esc b`) | coding agent (`leader a`, `Esc l`) |
 | --- | --- | --- |
-| default | `claude -p {prompt}` | `claude` |
+| default | `claude -p` (prompt on stdin) | `claude` |
 | runs | in the background, output → `CONTEXT.md` | interactively in a new task shell |
 | prompt | template + fixed output format | startup template |
 
@@ -177,8 +235,11 @@ use; `Esc E` opens them). They are Markdown with placeholders such as
 `{{task}}`, `{{context}}`, `{{workspaces}}`, `{{next_checkpoint}}`.
 pahiri always appends a fixed "output format" section to the one-shot
 prompts, so the part it parses cannot be edited away — including "less is
-more" and the word limit. Any CLI agent works: an argument containing
-`{prompt}` receives the prompt, otherwise it goes to stdin.
+more" and the word limit, and a note that ticket text is data, not
+instructions. Placeholders are filled in one pass, so text from a ticket
+is never expanded again. Any CLI agent works: an argument containing
+`{prompt}` receives the prompt, otherwise it goes to stdin (always for
+prompts over 100 kB).
 
 ### Skills
 
@@ -199,12 +260,21 @@ pahiri install-skills ~/.claude/skills        # or <tasks>/.agents/skills
 
 ## Gerrit
 
-`Esc g` scans every attached workspace for commits on the task branch
-that are not on its main branch (`origin/<main>` when present) and carry a
-`Change-Id:` trailer — the id Gerrit's commit-msg hook adds. Each becomes a
-`- gerrit:` line in `CONTEXT.md` with a link `https://<host>/q/<Change-Id>`;
-the host comes from the `origin` remote (`ssh://you@host:29418/project` →
-`https://host`) unless *Gerrit URL* is set.
+`Esc g` fetches `origin/<main>` in every attached workspace (batch-mode
+ssh, never prompts; if that fails it says how old the local copy is),
+warns when Gerrit's `commit-msg` hook is missing, and lists commits on
+the task branch that are not on main and carry a `Change-Id:` trailer.
+Each becomes a `- gerrit:` line in `CONTEXT.md` linked as
+`https://<host>/q/<Change-Id>` (host from the `origin` remote, or
+*Gerrit URL*). With a *Gerrit status command* set, pahiri also records
+each change's status and votes, e.g. `[NEW #1234 CR+2 V+1]` — the
+command gets the Change-Ids and prints JSON lines (format on the help
+page; `examples/gerrit-status.sh` does it with `ssh gerrit query`).
+
+`Esc P` pushes each workspace that is on the task branch for review
+(`git push origin HEAD:refs/for/<main>`), `Esc R` rebases it onto the
+latest `origin/<main>` (a conflict is aborted and reported). Both ask
+first.
 
 ## Command line
 
@@ -212,7 +282,10 @@ the host comes from the `origin` remote (`ssh://you@host:29418/project` →
 pahiri task next                     # current checkpoint ($PAHIRI_TASK or --task ID)
 pahiri task log "found the root cause"
 pahiri task ready [--off]
+pahiri task move --to Done           # column name or index; records the dates
+pahiri task outcome "shipped the fix; root cause was a stale token"
 pahiri report --from 2026-01-01 --to 2026-06-30 [--json]
+pahiri trash empty --older-than 30d
 pahiri install-skills <dir> [--force]
 ```
 
@@ -321,7 +394,15 @@ Config: `~/.config/pahiri/config.toml`. Logs and generated shell files:
 | `task_sources` | [] | `name`, `command` |
 | `default_main_branch` | `main` | for workspaces without their own `main_branch` |
 | `gerrit_url` | "" | empty: derived from each workspace's `origin` |
-| `agent.command` / `agent.args` | `claude` / `["-p", "{prompt}"]` | one-shot agent; empty command disables |
+| `gerrit_status_command` | "" | reports change status; format on the help page |
+| `hooks` | {} | `event = "command"`, see *Hooks* |
+| `hook_timeout_secs` | 15 | |
+| `keys` | {} | `"palette.timer" = "u"`, `"leader.coding_agent" = "A"` — names on the help page |
+| `archive_after_days` | 14 | hide finished tasks older than this (0: never) |
+| `soft_wrap` | true | wrap Markdown and text in the editor |
+| `restore_shells` | true | reopen each task's shells in the same folders after a restart |
+| `shell.tmux` | false | run shells in tmux sessions (socket `pahiri`) that survive pahiri |
+| `agent.command` / `agent.args` | `claude` / `["-p"]` | one-shot agent; empty command disables |
 | `agent.timeout_secs` | 600 | |
 | `agent.context_max_words` | 600 | 1–1000 |
 | `agent.context_prompt` / `agent.checkpoint_prompt` | "" | template paths; empty: `prompts/*.md` next to the config |
@@ -330,6 +411,7 @@ Config: `~/.config/pahiri/config.toml`. Logs and generated shell files:
 | `coding_agent.start_in_code` | true | else the task folder |
 | `timer.focus_minutes` | 25 | timer for tasks without checkpoints |
 | `timer.flash` / `timer.bell` | true / true | when time is up |
+| `timer.idle_minutes` | 15 | pause after this long without input (0: never) |
 | `color_scheme` | `dark` | `dark`, `light`, `gruvbox`, `nord`, `solarized` |
 | `shell.program` | `zsh` | `shell.args` defaults to `["-i"]` |
 | `leader_key` | `ctrl+b` | e.g. `ctrl+a`, `ctrl+space`, `alt+x` |
@@ -354,10 +436,10 @@ one, `d` deletes. Workspaces are written as `name = /path @main-branch`
 
 | where | keys |
 | ----- | ---- |
-| task list | `↑/↓` move · `Enter` open · `[`/`]` move task · `n` new · `d` delete · `m` timer · `v` checkpoint done · `K` checkpoints · `q` quit |
+| task list | `↑/↓` move · `Enter` open · `J`/`K` reorder · `[`/`]` move task · `/` filter · `A` archived · `n` new · `d` delete · `m` timer · `v` checkpoint done · `O` outcome · `q` quit |
 | files | `Enter` open/toggle · `←/→` collapse/expand · `a`/`A` new file/folder · `r` rename · `d` delete · `.` hidden · `t` shell |
 | shells | `Enter` focus · `n` new · `x` close · `←` hide pane |
-| editor | `Ctrl+S` save · `Ctrl+W` close |
+| editor | `Ctrl+S` save · `Ctrl+W` close · `Ctrl+Z`/`Ctrl+Y` undo/redo · `Ctrl+F` find · `F3`/`Ctrl+G` next |
 
 Large or binary files ask before opening; binaries open read-only as a hex
 dump. Rename, create and delete always act on the task folder only.

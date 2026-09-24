@@ -7,22 +7,27 @@
 pub mod config_form;
 pub mod context;
 pub mod event;
+pub mod keymap;
 pub mod palette;
 pub mod popup;
 pub mod timer;
 pub mod ui_state;
 
 mod agent;
-mod keymap;
+mod gerrit;
+mod help;
+mod hooks;
+mod session;
+
 mod mouse;
 mod work;
 
-use std::collections::HashMap;
+use std::collections::{BTreeMap, HashMap, VecDeque};
 use std::fmt::Write as _;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
-use std::time::Instant;
+use std::time::{Instant, SystemTime};
 
 use crossterm::event::{Event, KeyCode, KeyEvent, KeyEventKind, KeyModifiers};
 use tracing::{info, warn};
@@ -34,6 +39,7 @@ use crate::config::TaskSource;
 use crate::editor::Buffer;
 use crate::files::{ops, probe};
 use crate::git::{self, PrepareRequest};
+use crate::hooks::HookEvent;
 use crate::tasks::context::render_new;
 use crate::tasks::record::TaskRecord;
 use crate::tasks::{sources, TaskStore, Ticket};
@@ -42,10 +48,16 @@ use crate::terminal::{keys, PtyEvent, ShellId};
 pub use self::config_form::ConfigForm;
 pub use self::context::{Focus, Shell, TaskContext};
 pub use self::event::{AppEvent, EventSender, JobEvent};
+pub use self::help::HelpTopic;
 pub use self::palette::{Action, Palette};
 pub use self::popup::{CheckItem, Choice, Pending, Popup};
 pub use self::ui_state::UiState;
+pub use self::work::Today;
 pub use crate::time::{format_rfc3339, now_rfc3339};
+
+use self::hooks::{AfterHook, HookRun};
+use self::keymap::LeaderCmd;
+use self::session::SavedShell;
 
 /// Which top-level screen is showing.
 #[derive(Debug)]
@@ -109,6 +121,26 @@ pub struct App {
     /// Cancels the running agent job (Esc in its log popup).
     job_cancel: Option<Arc<AtomicBool>>,
     next_up: Vec<TaskRecord>,
+    records: HashMap<String, (Option<SystemTime>, TaskRecord)>,
+    today: Today,
+    /// When the app started (for blinking).
+    started: Instant,
+    /// Last key press, paste or mouse event (idle check).
+    last_input: Instant,
+    hooks_running: usize,
+    hook_runs: VecDeque<HookRun>,
+    /// Task list filter (`/`), and whether keys currently type into it.
+    list_filter: String,
+    filter_typing: bool,
+    /// Show finished tasks older than `archive_after_days`.
+    show_archived: bool,
+    /// Shells to reopen per task (from the last session).
+    restore_shells: BTreeMap<String, Vec<SavedShell>>,
+    session_saved: Instant,
+    watched: Instant,
+    leader_table: Vec<(char, LeaderCmd)>,
+    /// Last editor search.
+    search: Option<String>,
 }
 
 impl App {
@@ -133,6 +165,7 @@ impl App {
             }
         };
         let leader = config.leader();
+        let leader_table = keymap::leader_table(&config.keys);
         let mut app = Self {
             config,
             config_path,
@@ -158,11 +191,48 @@ impl App {
             bell: false,
             job_cancel: None,
             next_up: Vec::new(),
+            records: HashMap::new(),
+            today: Today::default(),
+            started: Instant::now(),
+            last_input: Instant::now(),
+            hooks_running: 0,
+            hook_runs: VecDeque::new(),
+            list_filter: String::new(),
+            filter_typing: false,
+            show_archived: false,
+            restore_shells: BTreeMap::new(),
+            session_saved: Instant::now(),
+            watched: Instant::now(),
+            leader_table,
+            search: None,
         };
         if matches!(app.mode, Mode::TaskList) {
             app.open_store();
+            app.restore_session();
+            app.fire_hook(HookEvent::Startup, None, Vec::new(), AfterHook::Nothing);
         }
         app
+    }
+
+    /// Task list filter text and whether it is being typed.
+    pub fn list_filter(&self) -> (&str, bool) {
+        (&self.list_filter, self.filter_typing)
+    }
+
+    /// Whether archived tasks are shown.
+    pub fn showing_archived(&self) -> bool {
+        self.show_archived
+    }
+
+    /// How many tasks of column `ci` are hidden as archived.
+    pub fn archived_count(&self, ci: usize) -> usize {
+        self.store.as_ref().map_or(0, |s| {
+            s.board().columns[ci]
+                .tasks
+                .iter()
+                .filter(|t| self.is_archived(t))
+                .count()
+        })
     }
 
     // ----- accessors used by the UI -------------------------------------------------
@@ -238,10 +308,22 @@ impl App {
     /// Flattened rows of the task list.
     pub fn rows(&self) -> Vec<ListRow> {
         let mut rows = Vec::new();
+        let filter = self.list_filter.to_lowercase();
         if let Some(store) = &self.store {
             for (ci, col) in store.board().columns.iter().enumerate() {
                 rows.push(ListRow::Header(ci));
                 for t in &col.tasks {
+                    if self.is_archived(t) {
+                        continue;
+                    }
+                    if !filter.is_empty() {
+                        let title = self.record(t).map_or("", |r| r.title.as_str());
+                        if !t.to_lowercase().contains(&filter)
+                            && !title.to_lowercase().contains(&filter)
+                        {
+                            continue;
+                        }
+                    }
                     rows.push(ListRow::Task(ci, t.clone()));
                 }
             }
@@ -320,6 +402,12 @@ impl App {
 
     /// Handle one event.
     pub fn handle(&mut self, event: AppEvent) {
+        if matches!(
+            event,
+            AppEvent::Input(Event::Key(_) | Event::Paste(_) | Event::Mouse(_))
+        ) {
+            self.last_input = Instant::now();
+        }
         match event {
             AppEvent::Input(Event::Key(key)) => self.handle_key(key),
             AppEvent::Input(Event::Paste(text)) => self.handle_paste(&text),
@@ -396,6 +484,14 @@ impl App {
             self.handle_popup_key(key);
             return;
         }
+        let in_terminal = matches!(self.mode, Mode::Task)
+            && self
+                .active_context()
+                .is_some_and(|c| c.focus == Focus::Terminal);
+        if key.code == KeyCode::F(1) && !in_terminal {
+            self.open_help(HelpTopic::Keys);
+            return;
+        }
         match self.mode {
             Mode::Config(_) => self.handle_config_key(key),
             Mode::TaskList => self.handle_list_key(key),
@@ -441,12 +537,8 @@ impl App {
         let Mode::Config(form) = &self.mode else {
             return;
         };
-        let field = &form.fields()[form.selected_field()];
-        let (title, text) = match field.key {
-            K::TaskSources => (
-                "Task sources · script format",
-                keymap::TASK_SOURCE_HELP.to_owned(),
-            ),
+        let topic = match form.fields()[form.selected_field()].key {
+            K::TaskSources => HelpTopic::Sources,
             K::AgentCommand
             | K::AgentArgs
             | K::AgentTimeout
@@ -456,10 +548,25 @@ impl App {
             | K::CodingCommand
             | K::CodingArgs
             | K::CodingPrompt
-            | K::CodingStartInCode => ("AI agents", keymap::AGENT_HELP.to_owned()),
-            _ => (field.label, field.help.clone()),
+            | K::CodingStartInCode => HelpTopic::Agents,
+            K::Hooks | K::HookTimeout => HelpTopic::Hooks,
+            K::GerritUrl | K::GerritStatus => HelpTopic::Gerrit,
+            K::Keys | K::LeaderKey => HelpTopic::Keys,
+            K::FocusMinutes | K::TimerFlash | K::TimerBell | K::IdleMinutes | K::ArchiveDays => {
+                HelpTopic::Work
+            }
+            _ => HelpTopic::Files,
         };
-        self.popup = Some(Popup::doc(title, &text));
+        self.open_help(topic);
+    }
+
+    /// Open the help page at `topic`.
+    pub(super) fn open_help(&mut self, topic: HelpTopic) {
+        self.popup = Some(Popup::Help {
+            tabs: self.help_tabs(),
+            tab: topic.index(),
+            scroll: 0,
+        });
     }
 
     /// `t` on a task-source item: run it now and show what was parsed.
@@ -499,6 +606,7 @@ impl App {
             || candidate.context_file != self.config.context_file;
         self.config = candidate;
         self.leader = self.config.leader();
+        self.leader_table = keymap::leader_table(&self.config.keys);
         if reopen || self.store.is_none() {
             self.contexts.clear();
             self.active_task = None;
@@ -546,15 +654,81 @@ impl App {
     // ----- task list ---------------------------------------------------------------
 
     fn handle_list_key(&mut self, key: KeyEvent) {
+        let selected = self.selected_task_id();
+        let filter_before = (self.list_filter.clone(), self.show_archived);
+        self.list_key(key);
+        // Keep the same task selected when the visible rows change.
+        if (self.list_filter.clone(), self.show_archived) != filter_before {
+            if let Some(id) = selected {
+                self.select_task_row(&id);
+            }
+            self.fix_list_selection();
+        }
+    }
+
+    fn list_key(&mut self, key: KeyEvent) {
+        if self.filter_typing {
+            match key.code {
+                KeyCode::Esc => {
+                    self.list_filter.clear();
+                    self.filter_typing = false;
+                }
+                KeyCode::Enter => self.filter_typing = false,
+                KeyCode::Backspace => {
+                    self.list_filter.pop();
+                }
+                KeyCode::Down | KeyCode::Up => {
+                    let rows = self.rows();
+                    self.move_list(if key.code == KeyCode::Down { 1 } else { -1 }, &rows);
+                    return;
+                }
+                KeyCode::Char(c) if !key.modifiers.contains(KeyModifiers::CONTROL) => {
+                    self.list_filter.push(c);
+                }
+                _ => {}
+            }
+            self.fix_list_selection();
+            return;
+        }
         let rows = self.rows();
+        let shift = key.modifiers.contains(KeyModifiers::SHIFT);
         match (key.code, key.modifiers) {
+            (KeyCode::Esc, _) if !self.list_filter.is_empty() => {
+                self.list_filter.clear();
+                self.fix_list_selection();
+            }
             (KeyCode::Esc, _) => self.open_palette(),
             (KeyCode::Char('q'), KeyModifiers::NONE)
             | (KeyCode::Char('c'), KeyModifiers::CONTROL) => {
                 self.request_quit();
             }
-            (KeyCode::Char('?'), _) => self.run_action(Action::Help),
+            (KeyCode::Char('?'), _) => self.open_help(HelpTopic::Keys),
             (KeyCode::Char(','), _) => self.open_config(),
+            (KeyCode::Char('/'), _) => {
+                self.filter_typing = true;
+                self.set_status(
+                    "filter: type an id or words of a title · Enter keeps it · Esc clears",
+                );
+            }
+            (KeyCode::Char('A'), _) => {
+                self.show_archived = !self.show_archived;
+                self.fix_list_selection();
+                self.set_status(if self.show_archived {
+                    "showing archived tasks"
+                } else {
+                    "archived tasks hidden"
+                });
+            }
+            (KeyCode::Char('J'), _) | (KeyCode::Down, _)
+                if shift || key.code == KeyCode::Char('J') =>
+            {
+                self.shift_selected(1);
+            }
+            (KeyCode::Char('K'), _) | (KeyCode::Up, _)
+                if shift || key.code == KeyCode::Char('K') =>
+            {
+                self.shift_selected(-1);
+            }
             (KeyCode::Down, _) | (KeyCode::Char('j'), _) => self.move_list(1, &rows),
             (KeyCode::Up, _) | (KeyCode::Char('k'), _) => self.move_list(-1, &rows),
             (KeyCode::Home, _) | (KeyCode::Char('g'), _) => {
@@ -583,8 +757,24 @@ impl App {
             (KeyCode::Char('m'), KeyModifiers::NONE) => self.run_action(Action::Timer),
             (KeyCode::Char('M'), _) => self.run_action(Action::StopTimer),
             (KeyCode::Char('v'), KeyModifiers::NONE) => self.run_action(Action::CheckpointDone),
-            (KeyCode::Char('K'), _) => self.run_action(Action::Checkpoints),
+            (KeyCode::Char('O'), _) => self.run_action(Action::RecordOutcome),
             _ => {}
+        }
+    }
+
+    /// Move the selected task up or down within its column (priority).
+    fn shift_selected(&mut self, delta: i32) {
+        let Some(id) = self.selected_task_id() else {
+            return;
+        };
+        let Some(store) = &mut self.store else { return };
+        match store.shift_task(&id, delta) {
+            Ok(true) => {
+                self.select_task_row(&id);
+                self.refresh_next_up();
+            }
+            Ok(false) => {}
+            Err(e) => self.error(e.to_string()),
         }
     }
 
@@ -669,14 +859,32 @@ impl App {
         };
         match result {
             Ok(summary) => {
-                self.select_task_row(&summary.id);
+                let meta =
+                    crate::tasks::context::read_meta(&summary.dir.join(&self.config.context_file))
+                        .unwrap_or_default();
+                let extra = vec![
+                    ("PAHIRI_SOURCE".into(), meta.source.unwrap_or_default()),
+                    ("PAHIRI_TICKET_URL".into(), meta.link.unwrap_or_default()),
+                ];
                 self.refresh_next_up();
-                self.set_status(format!("Created {}", summary.id));
-                if matches!(self.mode, Mode::Task) {
-                    self.enter_task(&summary.id);
-                }
+                self.fire_hook(
+                    HookEvent::TaskCreate,
+                    Some(&summary.id),
+                    extra,
+                    AfterHook::ShowCreated(summary.id.clone()),
+                );
             }
             Err(e) => self.error(e.to_string()),
+        }
+    }
+
+    /// After `task_create` (and its hook): select the task, open it in the task view.
+    pub(super) fn show_created(&mut self, id: &str) {
+        self.refresh_next_up();
+        self.select_task_row(id);
+        self.set_status(format!("Created {id}"));
+        if matches!(self.mode, Mode::Task) {
+            self.enter_task(id);
         }
     }
 
@@ -747,11 +955,64 @@ impl App {
 
     fn create_from_ticket(&mut self, source: &str, ticket: &Ticket) {
         let id = ticket.task_id();
+        let exists = self
+            .store
+            .as_ref()
+            .is_some_and(|s| s.tasks_dir().join(&id).exists());
+        if exists {
+            self.popup = Some(Popup::choose(
+                format!("{id} already exists"),
+                vec![
+                    Choice {
+                        label: format!("open {id}"),
+                        pending: Pending::OpenTask(id.clone()),
+                    },
+                    Choice {
+                        label: "refresh its ## Description from the ticket, then open it".into(),
+                        pending: Pending::RefreshDescription(
+                            id.clone(),
+                            ticket.description.clone(),
+                        ),
+                    },
+                    Choice {
+                        label: "cancel".into(),
+                        pending: Pending::Nothing,
+                    },
+                ],
+            ));
+            return;
+        }
         let context = render_new(&id, Some(source), Some(ticket), &now_rfc3339());
         self.create_task(&id, Some(context));
     }
 
+    /// Open a task: runs `task_leave` for the task being left and waits for
+    /// `task_enter` before the task view is drawn.
     fn enter_task(&mut self, id: &str) {
+        let leaving = self
+            .active_task
+            .clone()
+            .filter(|p| matches!(self.mode, Mode::Task) && p != id);
+        if let Some(prev) = &leaving {
+            self.fire_hook(
+                HookEvent::TaskLeave,
+                Some(prev),
+                vec![("PAHIRI_NEXT_TASK".into(), id.to_owned())],
+                AfterHook::Nothing,
+            );
+        }
+        let prev = self.active_task.clone().unwrap_or_default();
+        self.select_task_row(id);
+        self.fire_hook(
+            HookEvent::TaskEnter,
+            Some(id),
+            vec![("PAHIRI_PREV_TASK".into(), prev)],
+            AfterHook::EnterTask(id.to_owned()),
+        );
+    }
+
+    /// Show the task view (after the `task_enter` hook).
+    pub(super) fn open_task_view(&mut self, id: &str) {
         let Some(store) = &self.store else { return };
         let summary = store.summary(id);
         let context_path = store.context_path(id);
@@ -775,18 +1036,68 @@ impl App {
             let _ = ctx.reload_meta();
             let _ = ctx.refresh_env(&cfg, &state);
         }
+        self.restore_task_shells(id);
+    }
+
+    /// Reopen the shells this task had when pahiri last closed.
+    fn restore_task_shells(&mut self, id: &str) {
+        let Some(saved) = self.restore_shells.remove(id) else {
+            return;
+        };
+        let config = self.config.clone();
+        let state = self.state_dir.clone();
+        for s in saved {
+            let shell_id = self.next_shell_id;
+            let events = self.events.clone();
+            let Some(ctx) = self.contexts.get_mut(id) else {
+                return;
+            };
+            let tmux = s.tmux.filter(|_| config.shell.tmux);
+            match ctx.spawn_shell(
+                shell_id,
+                &config,
+                &state,
+                events,
+                s.cwd.filter(|p| p.is_dir()),
+                tmux,
+            ) {
+                Ok(()) => self.next_shell_id += 1,
+                Err(e) => warn!("could not restore a shell of {id}: {e:#}"),
+            }
+        }
+        if let Some(ctx) = self.contexts.get_mut(id) {
+            ctx.focus = Focus::Tree;
+            let n = ctx.shells.len();
+            if n > 0 {
+                self.set_status(format!("reopened {n} shell(s) from the last session"));
+            }
+        }
     }
 
     fn back_to_list(&mut self) {
+        let was_in_task = matches!(self.mode, Mode::Task);
         self.mode = Mode::TaskList;
         if let Some(id) = self.active_task.clone() {
             self.select_task_row(&id);
+            if was_in_task {
+                self.fire_hook(
+                    HookEvent::TaskLeave,
+                    Some(&id),
+                    vec![("PAHIRI_NEXT_TASK".into(), String::new())],
+                    AfterHook::Nothing,
+                );
+            }
         }
         self.refresh_next_up();
     }
 
     fn request_quit(&mut self) {
-        let live: usize = self.contexts.values().map(TaskContext::live_shells).sum();
+        let live: usize = self
+            .contexts
+            .values()
+            .flat_map(|c| c.shells.iter())
+            .filter(|s| !s.session.has_exited() && s.tmux.is_none())
+            .count();
         let dirty = self
             .contexts
             .values()
@@ -794,7 +1105,14 @@ impl App {
         if live > 0 || dirty {
             let mut parts = Vec::new();
             if live > 0 {
-                parts.push(format!("{live} running shell(s) will be terminated"));
+                parts.push(format!(
+                    "{live} running shell(s) will be terminated{}",
+                    if self.config.restore_shells {
+                        " (reopened in the same folders next time)"
+                    } else {
+                        ""
+                    }
+                ));
             }
             if dirty {
                 parts.push("unsaved editor changes will be lost".to_owned());
@@ -812,10 +1130,13 @@ impl App {
     // ----- palette and actions -----------------------------------------------------
 
     fn open_palette(&mut self) {
-        let commands = match self.mode {
-            Mode::Task => palette::task_commands(),
-            _ => palette::list_commands(),
-        };
+        let commands = keymap::apply_palette_overrides(
+            match self.mode {
+                Mode::Task => palette::task_commands(),
+                _ => palette::list_commands(),
+            },
+            &self.config.keys,
+        );
         self.popup = Some(Popup::Palette(Palette::new(commands)));
     }
 
@@ -864,9 +1185,9 @@ impl App {
             }
             Action::Save => self.save_editor(),
             Action::CloseEditor => self.close_editor(),
-            Action::Help => self.popup = Some(Popup::doc("Keys", keymap::HELP)),
+            Action::Help => self.open_help(HelpTopic::Keys),
             Action::DeleteTask => self.request_delete_task(),
-            Action::Timer => self.toggle_timer(),
+            Action::Timer => self.open_timer_menu(),
             Action::StopTimer => self.stop_timer(),
             Action::CheckpointDone => self.checkpoint_done(),
             Action::Checkpoints => self.show_checkpoints(),
@@ -876,6 +1197,38 @@ impl App {
             Action::BreakDown => self.run_agent(PromptKind::Checkpoints),
             Action::CodingAgent => self.launch_coding_agent(),
             Action::EditPrompts => self.choose_prompt(),
+            Action::RecordOutcome => self.request_outcome(),
+            Action::PushReview => self.request_git_job(gerrit::GitJob::Push),
+            Action::Rebase => self.request_git_job(gerrit::GitJob::Rebase),
+            Action::Find => {
+                if self.active_context().is_some_and(|c| c.editor.is_some()) {
+                    self.popup = Some(Popup::input(
+                        "Find",
+                        "text to find in the open file (F3 / Ctrl+G: next)",
+                        self.search.clone().unwrap_or_default(),
+                        Pending::Find,
+                    ));
+                } else {
+                    self.set_status("open a file first");
+                }
+            }
+        }
+    }
+
+    /// Jump to the next match of the last search in the editor.
+    fn find_next(&mut self) {
+        let Some(term) = self.search.clone() else {
+            self.run_action(Action::Find);
+            return;
+        };
+        let height = self.editor_height;
+        let Some(ed) = self.active_context_mut().and_then(|c| c.editor.as_mut()) else {
+            return;
+        };
+        if ed.find_next(&term) {
+            ed.ensure_visible(height);
+        } else {
+            self.set_status(format!("not found: {term}"));
         }
     }
 
@@ -946,21 +1299,28 @@ impl App {
         let Some(ctx) = self.active_context_mut() else {
             return;
         };
-        ctx.meta.workspaces = keys
+        let workspaces: Vec<String> = keys
             .iter()
             .filter_map(|k| k.strip_prefix("workspace:"))
             .map(str::to_owned)
             .collect();
-        ctx.meta.builds = keys
+        let builds: Vec<String> = keys
             .iter()
             .filter_map(|k| k.strip_prefix("build:"))
             .map(str::to_owned)
             .collect();
-        let summary = ctx.attachment_summary();
-        if let Err(e) = ctx.save_meta() {
+        // Read-modify-write on disk so changes made by hooks or agents survive.
+        let written = crate::tasks::context::update_meta(&ctx.context_path, &ctx.id, |m| {
+            m.workspaces = workspaces;
+            m.builds = builds;
+        });
+        if let Err(e) = written {
             self.error(format!("could not update CONTEXT.md: {e}"));
             return;
         }
+        let _ = ctx.reload_meta();
+        let summary = ctx.attachment_summary();
+        let id = ctx.id.clone();
         let _ = ctx.refresh_env(&cfg, &state);
         let _ = ctx.tree.refresh();
         self.reload_editor_if_context();
@@ -969,6 +1329,7 @@ impl App {
         } else {
             format!("attached · {summary}")
         });
+        self.fire_hook(HookEvent::Attach, Some(&id), Vec::new(), AfterHook::Nothing);
     }
 
     /// If the editor shows CONTEXT.md and is clean, reload it so managed edits show.
@@ -977,10 +1338,12 @@ impl App {
             return;
         };
         let path = ctx.context_path.clone();
-        if let Some(ed) = &ctx.editor {
+        if let Some(ed) = &mut ctx.editor {
             if ed.path() == path && !ed.is_dirty() {
-                if let Ok(buf) = Buffer::open(&path) {
-                    ctx.editor = Some(buf);
+                if let Ok(text) = std::fs::read_to_string(&path) {
+                    if text != ed.base_text() {
+                        ed.replace_saved(&text);
+                    }
                 }
             }
         }
@@ -1098,6 +1461,25 @@ impl App {
                     lines.push(line);
                 }
             }
+            JobEvent::Finished(line) => {
+                if let Some(Popup::Log { lines, done, .. }) = &mut self.popup {
+                    lines.push(String::new());
+                    lines.push(line);
+                    *done = true;
+                }
+                if let Some(id) = self.active_task.clone() {
+                    self.after_task_file_change(&id);
+                }
+            }
+            JobEvent::Hook {
+                event,
+                task,
+                command,
+                result,
+                millis,
+                then,
+                waited,
+            } => self.handle_hook_done(event, task, command, result, millis, then, waited),
             JobEvent::Tickets {
                 source,
                 result,
@@ -1119,7 +1501,7 @@ impl App {
                     }
                     Err(e) => Popup::doc(
                         format!("{source} · test failed"),
-                        &format!("{e}\n\n{}", keymap::TASK_SOURCE_HELP),
+                        &format!("{e}\n\n{}", help::TASK_SOURCE_FORMAT),
                     ),
                 });
             }
@@ -1164,17 +1546,33 @@ impl App {
                 if !succeeded.is_empty() {
                     let cfg = self.config.clone();
                     let state = self.state_dir.clone();
-                    if let Some(ctx) = self.contexts.get_mut(&task_id) {
-                        ctx.meta.branch = Some(task_id.clone());
-                        ctx.meta.prepared = Some(now_rfc3339());
-                        if let Err(e) = ctx.save_meta() {
+                    if let Some(path) = self.context_path(&task_id) {
+                        let now = now_rfc3339();
+                        let branch = task_id.clone();
+                        if let Err(e) = crate::tasks::context::update_meta(&path, &task_id, |m| {
+                            m.branch = Some(branch);
+                            m.prepared = Some(now);
+                        }) {
                             warn!("could not update CONTEXT.md: {e}");
                         }
+                    }
+                    if let Some(ctx) = self.contexts.get_mut(&task_id) {
+                        let _ = ctx.reload_meta();
                         let _ = ctx.refresh_env(&cfg, &state);
                         let _ = ctx.tree.refresh();
                     }
                     self.reload_editor_if_context();
                 }
+                let failed_names: Vec<String> = failed.iter().map(|(n, _)| n.clone()).collect();
+                self.fire_hook(
+                    HookEvent::PrepareDone,
+                    Some(&task_id),
+                    vec![
+                        ("PAHIRI_PREPARED".into(), succeeded.join(" ")),
+                        ("PAHIRI_FAILED".into(), failed_names.join(" ")),
+                    ],
+                    AfterHook::Nothing,
+                );
             }
         }
     }
@@ -1218,6 +1616,16 @@ impl App {
             }
             (KeyCode::Char('?'), _) if focus != Focus::Editor => {
                 self.run_action(Action::Help);
+                return;
+            }
+            (KeyCode::F(3), _) | (KeyCode::Char('g'), KeyModifiers::CONTROL)
+                if focus == Focus::Editor =>
+            {
+                self.find_next();
+                return;
+            }
+            (KeyCode::Char('f'), KeyModifiers::CONTROL) if focus == Focus::Editor => {
+                self.run_action(Action::Find);
                 return;
             }
             (KeyCode::Tab, m) if m.is_empty() => {
@@ -1454,8 +1862,31 @@ impl App {
         };
         let Some(ed) = &mut ctx.editor else { return };
         let is_context = ed.path() == ctx.context_path;
+        // pahiri (timer, AI, hooks, CLI) may have written CONTEXT.md while it
+        // was being edited: merge instead of overwriting.
+        let disk = is_context
+            .then(|| std::fs::read_to_string(ed.path()).ok())
+            .flatten()
+            .filter(|d| d.trim_end() != ed.base_text().trim_end());
+        let merged = disk.map(|d| {
+            let mut ours = ed.text();
+            if !ours.ends_with('\n') {
+                ours.push('\n');
+            }
+            crate::tasks::merge::merge(ed.base_text(), &ours, &d)
+        });
         let next = if ed.is_read_only() {
             Next::Status("read-only buffer".into())
+        } else if let Some(m) = merged {
+            match std::fs::write(ed.path(), &m) {
+                Ok(()) => {
+                    ed.replace_saved(&m);
+                    let _ = ctx.tree.refresh();
+                    let _ = ctx.reload_meta();
+                    Next::Status("Saved · merged pahiri's changes made while you edited".into())
+                }
+                Err(e) => Next::Error(format!("save failed: {e}")),
+            }
         } else if let Err(e) = ed.save() {
             Next::Error(format!("save failed: {e}"))
         } else {
@@ -1508,6 +1939,19 @@ impl App {
             (KeyCode::Char('w'), KeyModifiers::CONTROL)
             | (KeyCode::Char('q'), KeyModifiers::CONTROL) => {
                 next = Next::Action(Action::CloseEditor);
+            }
+            (KeyCode::Char('z'), KeyModifiers::CONTROL) => {
+                if !ed.undo() {
+                    next = Next::Status("nothing to undo".into());
+                }
+            }
+            (KeyCode::Char('y'), KeyModifiers::CONTROL) => {
+                if !ed.redo() {
+                    next = Next::Status("nothing to redo".into());
+                }
+            }
+            (KeyCode::Char('Z'), m) if m.contains(KeyModifiers::CONTROL) => {
+                ed.redo();
             }
             (KeyCode::Left, _) => ed.move_left(),
             (KeyCode::Right, _) => ed.move_right(),
@@ -1584,7 +2028,7 @@ impl App {
             self.set_status("open a task first");
             return;
         };
-        match ctx.spawn_shell(id, &config, &state, events) {
+        match ctx.spawn_shell(id, &config, &state, events, None, None) {
             Ok(()) => {
                 self.next_shell_id += 1;
                 info!(id, "spawned shell");
@@ -1608,9 +2052,14 @@ impl App {
             }
         } else {
             let id = shell.session.id();
+            let body = if shell.tmux.is_some() {
+                "The shell and its tmux session will be terminated."
+            } else {
+                "The running shell will be terminated."
+            };
             self.popup = Some(Popup::confirm(
                 "Close shell?",
-                "The running shell will be terminated.",
+                body,
                 Pending::CloseShell(id),
             ));
         }
@@ -1668,6 +2117,23 @@ impl App {
     /// Commands after the leader key (tmux/herdr style).
     fn handle_leader_command(&mut self, key: KeyEvent) {
         let leader = self.leader;
+        let cmd = match (key.code, key.modifiers) {
+            (KeyCode::Esc, _) => Some(LeaderCmd::Palette),
+            (KeyCode::Char('c'), KeyModifiers::CONTROL) => {
+                self.run_action(Action::Quit);
+                return;
+            }
+            (KeyCode::F(1), _) => Some(LeaderCmd::Help),
+            (KeyCode::Left, _) => Some(LeaderCmd::PrevShell),
+            (KeyCode::Right | KeyCode::Tab, _) => Some(LeaderCmd::NextShell),
+            (KeyCode::Up, _) => Some(LeaderCmd::Up),
+            (KeyCode::PageUp, _) => Some(LeaderCmd::ScrollUp),
+            (KeyCode::PageDown, _) => Some(LeaderCmd::ScrollDown),
+            (KeyCode::Char(c), _) if !leader.matches(&key) => {
+                keymap::leader_command(&self.leader_table, c)
+            }
+            _ => None,
+        };
         let Some(ctx) = self.active_context_mut() else {
             return;
         };
@@ -1680,32 +2146,38 @@ impl App {
             }
             return;
         }
-        let next = match (key.code, key.modifiers) {
-            (KeyCode::Esc, _) | (KeyCode::Char(':'), _) => Next::Palette,
-            (KeyCode::Char('a'), _) => Next::Action(Action::CodingAgent),
-            (KeyCode::Char('m'), _) => Next::Action(Action::Timer),
-            (KeyCode::Char('v'), _) => Next::Action(Action::CheckpointDone),
-            (KeyCode::Char('q'), _) | (KeyCode::Char('d'), _) => {
+        let scroll = |ctx: &mut TaskContext, up: bool| {
+            if let Some(shell) = ctx.active_shell_mut() {
+                let rows = i32::from(shell.session.size().0.max(2)) / 2;
+                shell.session.scroll_by(if up { rows } else { -rows });
+            }
+        };
+        let next = match cmd {
+            Some(LeaderCmd::Palette) => Next::Palette,
+            Some(LeaderCmd::CodingAgent) => Next::Action(Action::CodingAgent),
+            Some(LeaderCmd::Timer) => Next::Action(Action::Timer),
+            Some(LeaderCmd::CheckpointDone) => Next::Action(Action::CheckpointDone),
+            Some(LeaderCmd::Help) => Next::Action(Action::Help),
+            Some(LeaderCmd::NewShell) => Next::Action(Action::NewShell),
+            Some(LeaderCmd::CloseShell) => Next::Action(Action::CloseShell),
+            Some(LeaderCmd::Leave) => {
                 ctx.zoomed = false;
                 ctx.focus = Focus::Shells;
                 Next::None
             }
-            (KeyCode::Char('z'), _) | (KeyCode::Char('f'), _) => {
+            Some(LeaderCmd::Zoom) => {
                 ctx.zoomed = !ctx.zoomed;
                 Next::None
             }
-            (KeyCode::Char('c'), KeyModifiers::CONTROL) => Next::Action(Action::Quit),
-            (KeyCode::Char('n' | 't' | 'c' | 's'), _) => Next::Action(Action::NewShell),
-            (KeyCode::Char('x'), _) => Next::Action(Action::CloseShell),
-            (KeyCode::Char('h'), _) | (KeyCode::Char('p'), _) | (KeyCode::Left, _) => {
+            Some(LeaderCmd::PrevShell) => {
                 ctx.select_shell(-1);
                 Next::None
             }
-            (KeyCode::Char('l'), _) | (KeyCode::Right, _) | (KeyCode::Tab, _) => {
+            Some(LeaderCmd::NextShell) => {
                 ctx.select_shell(1);
                 Next::None
             }
-            (KeyCode::Char('k'), _) | (KeyCode::Up, _) => {
+            Some(LeaderCmd::Up) => {
                 ctx.zoomed = false;
                 ctx.focus = if ctx.editor.is_some() {
                     Focus::Editor
@@ -1714,27 +2186,20 @@ impl App {
                 };
                 Next::None
             }
-            (KeyCode::Char('e'), _) => {
+            Some(LeaderCmd::Files) => {
                 ctx.zoomed = false;
                 ctx.focus = Focus::Tree;
                 Next::None
             }
-            (KeyCode::Char('['), _) | (KeyCode::PageUp, _) => {
-                if let Some(shell) = ctx.active_shell_mut() {
-                    let rows = i32::from(shell.session.size().0.max(2)) / 2;
-                    shell.session.scroll_by(rows);
-                }
+            Some(LeaderCmd::ScrollUp) => {
+                scroll(ctx, true);
                 Next::None
             }
-            (KeyCode::Char(']'), _) | (KeyCode::PageDown, _) => {
-                if let Some(shell) = ctx.active_shell_mut() {
-                    let rows = i32::from(shell.session.size().0.max(2)) / 2;
-                    shell.session.scroll_by(-rows);
-                }
+            Some(LeaderCmd::ScrollDown) => {
+                scroll(ctx, false);
                 Next::None
             }
-            (KeyCode::Char('?'), _) => Next::Action(Action::Help),
-            _ => Next::Status(format!("unknown leader command; {leader} ? for help")),
+            None => Next::Status(format!("unknown leader command; {leader} ? for help")),
         };
         self.apply_next(next);
     }
@@ -1788,6 +2253,43 @@ impl App {
                     });
                 }
             }
+            Popup::Help {
+                tabs,
+                mut tab,
+                mut scroll,
+            } => {
+                let n = tabs.len().max(1);
+                let lines = tabs.get(tab).map_or(0, |t| t.1.len());
+                let max = lines.saturating_sub(1);
+                let mut close = false;
+                match key.code {
+                    KeyCode::Right | KeyCode::Tab | KeyCode::Char('l') => {
+                        tab = (tab + 1) % n;
+                        scroll = 0;
+                    }
+                    KeyCode::Left | KeyCode::BackTab | KeyCode::Char('h') => {
+                        tab = (tab + n - 1) % n;
+                        scroll = 0;
+                    }
+                    KeyCode::Char(d @ '1'..='9') => {
+                        let i = d as usize - '1' as usize;
+                        if i < n {
+                            tab = i;
+                            scroll = 0;
+                        }
+                    }
+                    KeyCode::Down | KeyCode::Char('j') => scroll = (scroll + 1).min(max),
+                    KeyCode::Up | KeyCode::Char('k') => scroll = scroll.saturating_sub(1),
+                    KeyCode::PageDown | KeyCode::Char(' ') => scroll = (scroll + 15).min(max),
+                    KeyCode::PageUp => scroll = scroll.saturating_sub(15),
+                    KeyCode::Home | KeyCode::Char('g') => scroll = 0,
+                    KeyCode::End | KeyCode::Char('G') => scroll = max,
+                    _ => close = true,
+                }
+                if !close {
+                    self.popup = Some(Popup::Help { tabs, tab, scroll });
+                }
+            }
             Popup::Checkpoints {
                 task_id,
                 mut items,
@@ -1795,9 +2297,8 @@ impl App {
             } => match key.code {
                 KeyCode::Esc | KeyCode::Char('q') => {}
                 KeyCode::Enter | KeyCode::Char('m') => {
-                    if let Some(c) = items.get(selected).filter(|c| !c.done) {
-                        let title = c.title.clone();
-                        self.start_timer(&task_id, Some(&title));
+                    if items.get(selected).is_some_and(|c| !c.done) {
+                        self.start_timer(&task_id, Some(selected));
                     } else {
                         self.popup = Some(Popup::Checkpoints {
                             task_id,
@@ -2172,6 +2673,40 @@ impl App {
                 }
             }
             Pending::EditPrompt(kind) => self.edit_prompt(kind),
+            Pending::TimerStart(id) => self.start_timer(&id, None),
+            Pending::StartFocusAsk(id) => {
+                self.popup = Some(Popup::input(
+                    "Focus block",
+                    format!("minutes on {id}"),
+                    self.config.timer.focus_minutes.to_string(),
+                    Pending::StartFocus(id),
+                ));
+            }
+            Pending::TimerResume(count) => self.resume_timer(count),
+            Pending::GitJob(job) => self.run_git_job(job),
+            Pending::OpenTask(id) => {
+                self.select_task_row(&id);
+                self.enter_task(&id);
+            }
+            Pending::RefreshDescription(id, description) => {
+                if let Some(path) = self.context_path(&id) {
+                    match crate::tasks::context::refresh_description(&path, &id, &description) {
+                        Ok(()) => {
+                            self.after_task_file_change(&id);
+                            self.select_task_row(&id);
+                            self.enter_task(&id);
+                            self.set_status(format!("{id}: description refreshed"));
+                        }
+                        Err(e) => self.error(format!("could not update {id}: {e}")),
+                    }
+                }
+            }
+            Pending::Find => {
+                if let Some(term) = input {
+                    self.search = Some(term);
+                    self.find_next();
+                }
+            }
         }
     }
 
@@ -2195,13 +2730,17 @@ impl App {
         }
     }
 
-    /// Book the running timer and kill all shells before exit.
+    /// Book and save the timer, save the session, and kill all shells before exit.
     pub fn shutdown(&mut self) {
+        // Book the timer, then save it (and the shells' folders) so the next
+        // start restores it paused and offers the time pahiri was closed.
         if self.timer.is_some() {
             self.book_time(true, false);
-            self.timer = None;
         }
+        self.save_session();
+        self.timer = None;
         for ctx in self.contexts.values_mut() {
+            ctx.detach_tmux();
             ctx.shells.clear();
         }
     }

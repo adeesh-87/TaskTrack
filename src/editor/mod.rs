@@ -4,6 +4,22 @@ use std::fs;
 use std::io;
 use std::path::{Path, PathBuf};
 
+/// Most undo steps kept.
+const UNDO_LIMIT: usize = 500;
+
+/// What the last edit was, for grouping typed characters into one undo step.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum EditKind {
+    Type,
+    Other,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct Snapshot {
+    lines: Vec<String>,
+    cursor: (usize, usize),
+}
+
 /// A text buffer with a cursor and a scroll offset.
 #[derive(Debug, Clone)]
 pub struct Buffer {
@@ -17,6 +33,13 @@ pub struct Buffer {
     read_only: bool,
     /// Incremented on every content change (used to invalidate caches).
     revision: u64,
+    /// Text as last loaded from or saved to disk.
+    base: String,
+    undo: Vec<Snapshot>,
+    redo: Vec<Snapshot>,
+    last_edit: Option<EditKind>,
+    /// Inside `insert_str`: the whole paste is one undo step.
+    batching: bool,
 }
 
 impl Buffer {
@@ -44,7 +67,130 @@ impl Buffer {
             dirty: false,
             read_only,
             revision: 0,
+            base: text.to_owned(),
+            undo: Vec::new(),
+            redo: Vec::new(),
+            last_edit: None,
+            batching: false,
         }
+    }
+
+    /// Text as last loaded or saved (the merge base for [`crate::tasks::merge`]).
+    pub fn base_text(&self) -> &str {
+        &self.base
+    }
+
+    /// Replace the whole content with text that is now on disk (after a merged
+    /// save). Keeps the cursor where possible; undo history is kept.
+    pub fn replace_saved(&mut self, text: &str) {
+        self.push_undo(EditKind::Other);
+        let mut lines: Vec<String> = text.lines().map(str::to_owned).collect();
+        if lines.is_empty() || text.ends_with('\n') {
+            lines.push(String::new());
+        }
+        self.lines = lines;
+        text.clone_into(&mut self.base);
+        self.dirty = false;
+        self.revision += 1;
+        self.set_cursor(self.cursor.0, self.cursor.1);
+    }
+
+    fn push_undo(&mut self, kind: EditKind) {
+        if self.batching {
+            return;
+        }
+        let group = kind == EditKind::Type && self.last_edit == Some(EditKind::Type);
+        self.last_edit = Some(kind);
+        self.redo.clear();
+        if group {
+            return;
+        }
+        self.undo.push(Snapshot {
+            lines: self.lines.clone(),
+            cursor: self.cursor,
+        });
+        if self.undo.len() > UNDO_LIMIT {
+            self.undo.remove(0);
+        }
+    }
+
+    fn restore(&mut self, snap: Snapshot) {
+        self.lines = snap.lines;
+        self.cursor = snap.cursor;
+        self.revision += 1;
+        self.dirty = self.text().trim_end_matches('\n') != self.base.trim_end_matches('\n');
+        self.last_edit = None;
+    }
+
+    /// Undo the last edit. Returns whether there was one.
+    pub fn undo(&mut self) -> bool {
+        let Some(snap) = self.undo.pop() else {
+            return false;
+        };
+        self.redo.push(Snapshot {
+            lines: self.lines.clone(),
+            cursor: self.cursor,
+        });
+        self.restore(snap);
+        true
+    }
+
+    /// Redo an undone edit. Returns whether there was one.
+    pub fn redo(&mut self) -> bool {
+        let Some(snap) = self.redo.pop() else {
+            return false;
+        };
+        self.undo.push(Snapshot {
+            lines: self.lines.clone(),
+            cursor: self.cursor,
+        });
+        self.restore(snap);
+        true
+    }
+
+    /// Move the cursor to the next case-insensitive match of `needle` after the
+    /// cursor (wrapping). Returns whether one was found.
+    pub fn find_next(&mut self, needle: &str) -> bool {
+        let needle = needle.to_lowercase();
+        if needle.is_empty() {
+            return false;
+        }
+        let n = self.lines.len();
+        let (row, col) = self.cursor;
+        for step in 0..=n {
+            let r = (row + step) % n;
+            let line = self.lines[r].to_lowercase();
+            let from = if step == 0 { col + 1 } else { 0 };
+            let start_byte = Self::byte_index(&line, from.min(line.chars().count()));
+            if step == n && from == 0 {
+                break;
+            }
+            if let Some(i) = line[start_byte..].find(&needle) {
+                let char_col = line[..start_byte + i].chars().count();
+                self.cursor = (r, char_col);
+                return true;
+            }
+        }
+        // Wrapped all the way: a match at or before the cursor on its own line.
+        let line = self.lines[row].to_lowercase();
+        if let Some(i) = line.find(&needle) {
+            self.cursor = (row, line[..i].chars().count());
+            return true;
+        }
+        false
+    }
+
+    /// Set the first visible line.
+    pub fn set_scroll(&mut self, scroll: usize) {
+        self.scroll = scroll.min(self.lines.len().saturating_sub(1));
+    }
+
+    fn text_for_disk(&self) -> String {
+        let mut text = self.text();
+        if !text.ends_with('\n') {
+            text.push('\n');
+        }
+        text
     }
 
     /// File backing this buffer.
@@ -116,12 +262,11 @@ impl Buffer {
                 "buffer is read-only",
             ));
         }
-        let mut text = self.text();
-        if !text.ends_with('\n') {
-            text.push('\n');
-        }
-        fs::write(&self.path, text)?;
+        let text = self.text_for_disk();
+        fs::write(&self.path, &text)?;
+        self.base = text;
         self.dirty = false;
+        self.last_edit = None;
         Ok(())
     }
 
@@ -225,6 +370,11 @@ impl Buffer {
         if self.read_only {
             return;
         }
+        self.push_undo(if c.is_whitespace() {
+            EditKind::Other
+        } else {
+            EditKind::Type
+        });
         let (row, col) = self.cursor;
         let line = &mut self.lines[row];
         let idx = Self::byte_index(line, col);
@@ -236,6 +386,11 @@ impl Buffer {
 
     /// Insert a string (e.g. a paste) at the cursor, honouring newlines.
     pub fn insert_str(&mut self, s: &str) {
+        if self.read_only {
+            return;
+        }
+        self.push_undo(EditKind::Other);
+        self.batching = true;
         for c in s.chars() {
             match c {
                 '\n' => self.insert_newline(),
@@ -243,6 +398,8 @@ impl Buffer {
                 c => self.insert_char(c),
             }
         }
+        self.batching = false;
+        self.last_edit = Some(EditKind::Other);
     }
 
     /// Split the line at the cursor.
@@ -250,6 +407,7 @@ impl Buffer {
         if self.read_only {
             return;
         }
+        self.push_undo(EditKind::Other);
         let (row, col) = self.cursor;
         let idx = Self::byte_index(&self.lines[row], col);
         let rest = self.lines[row].split_off(idx);
@@ -261,9 +419,10 @@ impl Buffer {
 
     /// Delete the character before the cursor (joining lines at column 0).
     pub fn backspace(&mut self) {
-        if self.read_only {
+        if self.read_only || self.cursor == (0, 0) {
             return;
         }
+        self.push_undo(EditKind::Other);
         let (row, col) = self.cursor;
         if col > 0 {
             let idx = Self::byte_index(&self.lines[row], col - 1);
@@ -271,14 +430,12 @@ impl Buffer {
             self.cursor.1 -= 1;
             self.dirty = true;
             self.revision += 1;
-            self.revision += 1;
         } else if row > 0 {
             let line = self.lines.remove(row);
             let prev_len = self.line_len(row - 1);
             self.lines[row - 1].push_str(&line);
             self.cursor = (row - 1, prev_len);
             self.dirty = true;
-            self.revision += 1;
             self.revision += 1;
         }
     }
@@ -288,18 +445,17 @@ impl Buffer {
         if self.read_only {
             return;
         }
+        self.push_undo(EditKind::Other);
         let (row, col) = self.cursor;
         if col < self.line_len(row) {
             let idx = Self::byte_index(&self.lines[row], col);
             self.lines[row].remove(idx);
             self.dirty = true;
             self.revision += 1;
-            self.revision += 1;
         } else if row + 1 < self.lines.len() {
             let next = self.lines.remove(row + 1);
             self.lines[row].push_str(&next);
             self.dirty = true;
-            self.revision += 1;
             self.revision += 1;
         }
     }
@@ -492,6 +648,61 @@ mod tests {
         b.save().unwrap();
         assert!(!b.is_dirty());
         assert_eq!(fs::read_to_string(&p).unwrap(), "zero\none\n");
+    }
+
+    #[test]
+    fn undo_redo_groups_typing() {
+        let mut b = buf("x");
+        b.end();
+        for c in "abc".chars() {
+            b.insert_char(c);
+        }
+        b.insert_char(' ');
+        for c in "de".chars() {
+            b.insert_char(c);
+        }
+        assert_eq!(b.text(), "xabc de");
+        assert!(b.undo());
+        assert_eq!(b.text(), "xabc ");
+        assert!(b.undo());
+        assert_eq!(b.text(), "xabc");
+        assert!(b.undo());
+        assert_eq!(b.text(), "x");
+        assert!(!b.is_dirty(), "back to the loaded text");
+        assert!(!b.undo());
+        assert!(b.redo());
+        assert_eq!(b.text(), "xabc");
+        b.insert_str("1\n2");
+        assert_eq!(b.text(), "xabc1\n2");
+        assert!(b.undo());
+        assert_eq!(b.text(), "xabc");
+        assert!(!b.redo() || b.text() == "xabc1\n2");
+    }
+
+    #[test]
+    fn find_wraps_and_is_case_insensitive() {
+        let mut b = buf("alpha\nBeta beta\ngamma");
+        assert!(b.find_next("beta"));
+        assert_eq!(b.cursor(), (1, 0));
+        assert!(b.find_next("beta"));
+        assert_eq!(b.cursor(), (1, 5));
+        assert!(b.find_next("BETA"));
+        assert_eq!(b.cursor(), (1, 0));
+        assert!(b.find_next("alp"));
+        assert_eq!(b.cursor(), (0, 0));
+        assert!(!b.find_next("zzz"));
+        assert!(!b.find_next(""));
+    }
+
+    #[test]
+    fn replace_saved_keeps_cursor_and_base() {
+        let mut b = buf("a\nb\n");
+        b.set_cursor(1, 1);
+        b.insert_char('x');
+        b.replace_saved("a\nbx\nc\n");
+        assert!(!b.is_dirty());
+        assert_eq!(b.base_text(), "a\nbx\nc\n");
+        assert_eq!(b.cursor(), (1, 2));
     }
 
     #[test]

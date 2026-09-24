@@ -28,6 +28,25 @@ pub enum JobEvent {
         /// Whether at least one workspace could be scanned.
         scanned: bool,
     },
+    /// A hook finished.
+    Hook {
+        /// Event.
+        event: crate::hooks::HookEvent,
+        /// Task.
+        task: Option<String>,
+        /// Command that ran.
+        command: String,
+        /// stdout or the error.
+        result: Result<String, String>,
+        /// Duration.
+        millis: u128,
+        /// What to do next.
+        then: super::hooks::AfterHook,
+        /// Whether pahiri waited for it (a log popup is showing).
+        waited: bool,
+    },
+    /// A background job finished: add this line to its log and mark it done.
+    Finished(String),
     /// A one-shot agent call finished.
     Agent {
         /// Task id.

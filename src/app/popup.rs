@@ -64,6 +64,20 @@ pub enum Pending {
     Outcome(String),
     /// Open a prompt template in the editor.
     EditPrompt(PromptKind),
+    /// Start the timer on this task's next checkpoint (or a focus block).
+    TimerStart(String),
+    /// Ask for focus block minutes for this task.
+    StartFocusAsk(String),
+    /// Resume the timer; `true` counts the time away.
+    TimerResume(bool),
+    /// Push for review / rebase.
+    GitJob(super::gerrit::GitJob),
+    /// Open this task.
+    OpenTask(String),
+    /// Replace the task's `## Description` with this text.
+    RefreshDescription(String, String),
+    /// Search the editor for the entered text.
+    Find,
     /// Nothing (used by cancel options).
     Nothing,
 }
@@ -169,6 +183,15 @@ pub enum Popup {
         /// First visible line.
         scroll: usize,
     },
+    /// The help page.
+    Help {
+        /// (title, lines) per tab.
+        tabs: Vec<(String, Vec<String>)>,
+        /// Current tab.
+        tab: usize,
+        /// First visible line.
+        scroll: usize,
+    },
     /// The checkpoint list of a task.
     Checkpoints {
         /// Task id.
@@ -253,6 +276,7 @@ impl Popup {
             Popup::Tickets { source, .. } => source,
             Popup::Palette(_) => "commands",
             Popup::Checkpoints { .. } => "checkpoints",
+            Popup::Help { .. } => "help",
         }
     }
 

@@ -17,6 +17,13 @@ const DOUBLE_CLICK: Duration = Duration::from_millis(400);
 impl App {
     /// Handle a mouse event.
     pub(super) fn handle_mouse(&mut self, m: MouseEvent) {
+        let on_chip = self.ui.timer_chip.contains(Position::new(m.column, m.row));
+        if on_chip && matches!(m.kind, MouseEventKind::Down(MouseButton::Left)) {
+            if !matches!(self.popup, Some(super::Popup::Log { done: false, .. })) {
+                self.open_timer_menu();
+            }
+            return;
+        }
         if self.popup.is_some() {
             match m.kind {
                 MouseEventKind::ScrollUp => {
@@ -170,6 +177,7 @@ impl App {
         let rect = self.ui.editor;
         let gutter = self.ui.editor_gutter;
         let hscroll = self.ui.editor_hscroll;
+        let rows = self.ui.editor_rows.clone();
         let tab_width = usize::from(self.config.tab_width.max(1));
         let height = usize::from(rect.height.max(1));
         let Some(ctx) = self.active_context_mut() else {
@@ -180,8 +188,12 @@ impl App {
             MouseEventKind::ScrollUp => ed.scroll_by(-3, height),
             MouseEventKind::ScrollDown => ed.scroll_by(3, height),
             MouseEventKind::Down(MouseButton::Left) => {
-                let row = ed.scroll() + usize::from(m.row - rect.y);
-                let disp = usize::from(m.column.saturating_sub(rect.x + gutter)) + hscroll;
+                let visual = usize::from(m.row - rect.y);
+                let (row, start) = rows
+                    .get(visual)
+                    .copied()
+                    .unwrap_or((ed.scroll() + visual, hscroll));
+                let disp = usize::from(m.column.saturating_sub(rect.x + gutter)) + start;
                 let line = ed.lines().get(row).map_or("", String::as_str);
                 let col = char_col_at(line, disp, tab_width);
                 ed.set_cursor(row, col);

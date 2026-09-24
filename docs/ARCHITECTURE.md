@@ -28,16 +28,21 @@ loop: terminal.draw(ui::draw(&mut app)) → wait for next event → app.handle
 | `src/app/mod.rs` | `App`, modes (`Config`/`TaskList`/`Task`), key handling, popups, `run_action`, `run_pending`, job results |
 | `src/app/palette.rs` | `Action` enum + palette entries (key, label) for list and task view |
 | `src/app/popup.rs` | `Popup` variants and `Pending` (what a confirmed popup does) |
-| `src/app/work.rs` | delete (to `.trash`), timer start/pause/stop/alarm, checkpoints, dates, "next up" |
-| `src/app/agent.rs` | AI context / checkpoints, coding agent launch, prompt editing, Gerrit |
-| `src/app/timer.rs` | pure timer arithmetic (budget, overtime, booking minutes) |
+| `src/app/work.rs` | delete (to `.trash`), timer menu / alarm / idle / booking, checkpoints, dates, records cache, "today / next up", watching outside changes |
+| `src/app/agent.rs` | AI context / checkpoints, coding agent launch, prompt editing |
+| `src/app/gerrit.rs` | Gerrit scan (fetch, hook check, status command), push for review, rebase |
+| `src/app/hooks.rs` | running user hooks: env, waiting hooks (`task_enter`, `task_create`), recent runs |
+| `src/app/help.rs` | the tabbed help page (built from the live config) and the script format texts |
+| `src/app/session.rs` | `session.json`: timer and shells across restarts |
+| `src/app/timer.rs` | pure timer arithmetic (budget, overtime, idle/away, booking minutes, save/restore) |
 | `src/app/context.rs` | `TaskContext`: per-task tree, shells, editor, focus, meta, checkpoints |
 | `src/app/config_form.rs` | settings page model (`FieldKey`, fields, list editing, `to_config`) |
 | `src/app/mouse.rs`, `ui_state.rs` | mouse handling and recorded geometry |
-| `src/app/keymap.rs` | help texts (`HELP`, `TASK_SOURCE_HELP`, `AGENT_HELP`) |
-| `src/tasks/` | disk model: `store.rs` (folders, board), `board.rs` (`status.md`), `context.rs` (managed block, log, context section), `checkpoints.rs`, `sections.rs` (marker helpers), `record.rs` (read-only summary), `sources.rs` (ticket scripts) |
+| `src/app/keymap.rs` | leader commands table, key overrides (`[keys]`) and their validation |
+| `src/hooks.rs` | hook events (names, descriptions, env docs) and the `sh -c` runner |
+| `src/tasks/` | disk model: `store.rs` (folders, board, trash, outside changes), `board.rs` (`status.md`), `context.rs` (managed block, log, context, dates), `checkpoints.rs`, `sections.rs` (marker helpers), `merge.rs` (save-merge of CONTEXT.md), `ledger.rs` (`timelog.tsv`), `record.rs` (read-only summary), `sources.rs` (ticket and Gerrit status script output) |
 | `src/ai/mod.rs` | prompt templates, fixed output formats, `run()` for one-shot agents |
-| `src/git/mod.rs` | `prepare` sequence, main-branch detection, Gerrit `Change-Id` scan |
+| `src/git/mod.rs` | `prepare`, main-branch detection, `Change-Id` scan, fetch, push for review, rebase |
 | `src/terminal/` | PTY sessions, key/mouse encoding, VT rendering, shell `cd` integration |
 | `src/editor/`, `src/files/`, `src/highlight/` | text buffer, file tree/ops, syntax lexers |
 | `src/ui/` | ratatui drawing: `mod.rs` (layout, status bar, flash), `task_list`, `task_view` (sidebar, next up, editor, terminal), `popup`, `config_page`, `theme` |
@@ -48,7 +53,11 @@ loop: terminal.draw(ui::draw(&mut app)) → wait for next event → app.handle
 - Config: `~/.config/pahiri/config.toml`; prompt templates in `prompts/` next to it.
 - Tasks: `<tasks_dir>/<ID>/CONTEXT.md` + anything else; board in `<tasks_dir>/status.md`;
   deleted tasks in `<tasks_dir>/.trash/`.
-- Runtime: `~/.local/state/pahiri/` (log, generated shell rc files, per-task env files, coding-agent prompts).
+- Time ledger: `<tasks_dir>/timelog.tsv`.
+- Runtime: `~/.local/state/pahiri/` (log, `session.json`, generated shell rc and tmux files, per-task env files, coding-agent prompts).
 
-pahiri re-reads a task's `CONTEXT.md` when its mtime changes (checked every
-tick), so agents and `pahiri task …` can edit it while the TUI runs.
+About once a second (`App::reload_outside_changes`) pahiri re-reads the
+board, the task folders, the open task's `CONTEXT.md` and its file tree when
+they changed on disk, so hooks, agents and `pahiri task …` can edit them
+while the TUI runs. Saving `CONTEXT.md` from the editor merges changes made
+meanwhile (`tasks/merge.rs`).

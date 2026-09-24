@@ -32,6 +32,10 @@ pub struct UiState {
     pub config_rows: Rect,
     /// Index of the first visible settings row.
     pub config_first_row: usize,
+    /// The timer chip in the status bar.
+    pub timer_chip: Rect,
+    /// With soft wrap: (buffer line, first display column) of each editor row.
+    pub editor_rows: Vec<(usize, usize)>,
 }
 
 impl UiState {
@@ -43,6 +47,8 @@ impl UiState {
         self.editor = Rect::default();
         self.terminal = Rect::default();
         self.config_rows = Rect::default();
+        self.timer_chip = Rect::default();
+        self.editor_rows.clear();
     }
 
     /// Row index of a click inside a bordered list, if any.

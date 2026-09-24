@@ -40,8 +40,95 @@ fn list_lines<'a>(
     (shown, first)
 }
 
+/// The help page: a large box with a tab bar.
+fn draw_help(
+    frame: &mut Frame<'_>,
+    tabs: &[(String, Vec<String>)],
+    tab: usize,
+    scroll: usize,
+    area: Rect,
+    theme: &Theme,
+) {
+    let rect = centered(
+        area,
+        area.width.saturating_sub(4).max(20).min(area.width),
+        area.height.saturating_sub(2).max(6).min(area.height),
+    );
+    frame.render_widget(Clear, rect);
+    let block = Block::bordered()
+        .title(Span::styled(
+            " pahiri help ",
+            Style::new().fg(theme.accent).add_modifier(Modifier::BOLD),
+        ))
+        .border_style(Style::new().fg(theme.border_focus))
+        .style(Style::new().bg(theme.bg).fg(theme.fg));
+    let inner = block.inner(rect);
+    frame.render_widget(block, rect);
+    let [bar, body, foot] = Layout::vertical([
+        Constraint::Length(1),
+        Constraint::Min(1),
+        Constraint::Length(1),
+    ])
+    .areas(inner);
+    let mut spans = Vec::new();
+    for (i, (title, _)) in tabs.iter().enumerate() {
+        let style = if i == tab {
+            theme.selected(true)
+        } else {
+            Style::new().fg(theme.muted)
+        };
+        spans.push(Span::styled(format!(" {} {title} ", i + 1), style));
+    }
+    frame.render_widget(Paragraph::new(Line::from(spans)), bar);
+    let lines: Vec<Line<'_>> = tabs
+        .get(tab)
+        .map(|(_, l)| {
+            l.iter()
+                .skip(scroll)
+                .take(body.height as usize)
+                .map(|l| {
+                    let is_heading = !l.starts_with(' ')
+                        && l.len() > 2
+                        && l.chars()
+                            .take_while(|c| *c != ' ')
+                            .all(|c| c.is_uppercase() || !c.is_alphabetic());
+                    if is_heading {
+                        Line::styled(
+                            l.clone(),
+                            Style::new().fg(theme.header).add_modifier(Modifier::BOLD),
+                        )
+                    } else {
+                        Line::raw(l.clone())
+                    }
+                })
+                .collect()
+        })
+        .unwrap_or_default();
+    let text = Rect {
+        x: body.x + 1,
+        width: body.width.saturating_sub(2),
+        ..body
+    };
+    frame.render_widget(Paragraph::new(lines), text);
+    let total = tabs.get(tab).map_or(0, |t| t.1.len());
+    frame.render_widget(
+        Paragraph::new(hint(
+            &format!(
+                " ←/→ or 1-9 tabs · ↑/↓ PgUp/PgDn scroll ({}/{total}) · any other key closes",
+                (scroll + 1).min(total.max(1))
+            ),
+            theme,
+        )),
+        foot,
+    );
+}
+
 /// Draw the popup over `area`.
 pub fn draw(frame: &mut Frame<'_>, popup: &Popup, area: Rect, theme: &Theme) {
+    if let Popup::Help { tabs, tab, scroll } = popup {
+        draw_help(frame, tabs, *tab, *scroll, area, theme);
+        return;
+    }
     let wide = matches!(
         popup,
         Popup::Log { .. }
@@ -179,6 +266,7 @@ pub fn draw(frame: &mut Frame<'_>, popup: &Popup, area: Rect, theme: &Theme) {
             });
             lines
         }
+        Popup::Help { .. } => Vec::new(),
         Popup::Doc { lines, scroll, .. } => {
             let max = max_list + 2;
             let mut out: Vec<Line<'_>> = lines

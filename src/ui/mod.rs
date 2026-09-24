@@ -75,29 +75,79 @@ fn split_columns(area: Rect) -> [Rect; 2] {
     Layout::horizontal([Constraint::Percentage(SIDEBAR_PERCENT), Constraint::Min(10)]).areas(area)
 }
 
-fn draw_status_bar(frame: &mut Frame<'_>, app: &App, area: Rect, theme: &Theme) {
+/// The timer chip: text and style (always shown; click it or Esc m).
+fn timer_chip(app: &App, theme: &Theme) -> (String, Style) {
+    let Some(t) = app.timer() else {
+        return (
+            " ⏱ timer · Esc m ".to_owned(),
+            Style::new().fg(theme.muted).bg(theme.bar_bg),
+        );
+    };
+    let now = std::time::Instant::now();
+    let what: String = t.what().chars().take(32).collect();
+    let over = t.remaining_secs(now) < 0;
+    let text = if t.alarming() {
+        format!(" ⏰ TIME'S UP · {} · {what} · {} ", t.task_id, t.label(now))
+    } else if t.is_running() {
+        format!(" ⏱ {} · {what} · {} ", t.task_id, t.label(now))
+    } else {
+        format!(" ⏸ {} · {what} · {} ", t.task_id, t.label(now))
+    };
+    let style = if t.alarming() {
+        if app.timer_blink_on() {
+            Style::new()
+                .bg(theme.error)
+                .fg(theme.selected_fg)
+                .add_modifier(Modifier::BOLD)
+        } else {
+            Style::new()
+                .fg(theme.error)
+                .bg(theme.bar_bg)
+                .add_modifier(Modifier::BOLD)
+        }
+    } else if over {
+        Style::new()
+            .fg(theme.error)
+            .bg(theme.bar_bg)
+            .add_modifier(Modifier::BOLD)
+    } else if t.is_running() {
+        Style::new()
+            .bg(theme.selected_bg)
+            .fg(theme.selected_fg)
+            .add_modifier(Modifier::BOLD)
+    } else {
+        Style::new().fg(theme.warning).bg(theme.bar_bg)
+    };
+    (text, style)
+}
+
+fn draw_status_bar(frame: &mut Frame<'_>, app: &mut App, area: Rect, theme: &Theme) {
     let leader = app.leader().to_string();
     let hint = match app.popup() {
         Some(Popup::Palette(p)) if p.typing => "type to filter · Enter run · Esc close".to_owned(),
         Some(Popup::Palette(_)) => "shortcut letter runs · : to type · ↑/↓ Enter · Esc close".to_owned(),
-        Some(Popup::Log { done: false, .. }) => "working … please wait".to_owned(),
+        Some(Popup::Log { done: false, .. }) => "working … Esc cancels agents and hooks".to_owned(),
+        Some(Popup::Help { .. }) => "←/→ tabs · ↑/↓ scroll · any other key closes".to_owned(),
         Some(_) => "Enter confirm · Esc cancel".to_owned(),
         None => match app.mode() {
             Mode::Config(form) if form.editing() => "Enter apply · Esc cancel edit".to_owned(),
             Mode::Config(_) => {
                 "↑/↓ select · Enter edit · a add · d delete · ←/→ cycle · ? help · t test source · Ctrl+S save · Esc back".to_owned()
             }
-            Mode::TaskList => "Esc commands · Enter open · n new · d delete · m timer · v checkpoint done · [ ] move · q quit".to_owned(),
+            Mode::TaskList => match app.list_filter() {
+                (f, true) => format!("filter: {f}▏ · Enter keep · Esc clear"),
+                _ => "Esc commands · F1 help · Enter open · / filter · J/K reorder · m timer · v done · d delete".to_owned(),
+            },
             Mode::Task => match app.active_context().map(|c| c.focus) {
                 Some(Focus::Terminal) if app.leader_pending() => {
-                    format!("{leader} + q leave · z zoom · n new · x close · Esc commands · ? keys")
+                    format!("{leader} + q leave · z zoom · n new · a agent · m timer · ? help")
                 }
                 Some(Focus::Terminal) => {
-                    format!("keys go to the shell · {leader} q leave · Ctrl+Tab next pane · Ctrl+1..9 shells")
+                    format!("keys go to the shell · {leader} q leave · {leader} ? help · Ctrl+Tab next pane")
                 }
-                Some(Focus::Editor) => "Esc commands · Ctrl+S save · Ctrl+W close · Ctrl+Tab next pane".to_owned(),
+                Some(Focus::Editor) => "Esc commands · Ctrl+S save · Ctrl+Z undo · Ctrl+F find · Ctrl+Tab next pane".to_owned(),
                 Some(Focus::Shells) => "Esc commands · Enter focus · n new · x close · Ctrl+1..9 select".to_owned(),
-                _ => "Esc commands · Enter open · a/A new · r rename · d delete · t shell · Ctrl+Tab next pane".to_owned(),
+                _ => "Esc commands · F1 help · Enter open · a/A new · r rename · d delete · t shell".to_owned(),
             },
         },
     };
@@ -111,37 +161,17 @@ fn draw_status_bar(frame: &mut Frame<'_>, app: &App, area: Rect, theme: &Theme) 
             Style::new().fg(theme.accent),
         ));
     }
-    let (right, right_style) = if app.leader_pending() {
-        (format!(" {leader} … "), Style::new().fg(theme.muted))
-    } else if let Some(t) = app.timer() {
-        let now = std::time::Instant::now();
-        let over = t.remaining_secs(now) < 0;
-        let style = if over {
-            Style::new().fg(theme.error).add_modifier(Modifier::BOLD)
-        } else if t.is_running() {
-            Style::new().fg(theme.accent).add_modifier(Modifier::BOLD)
-        } else {
-            Style::new().fg(theme.warning)
-        };
-        let what: String = t.what().chars().take(40).collect();
-        (
-            format!(" ⏱ {} · {what} · {} ", t.task_id, t.label(now)),
-            style,
-        )
-    } else {
-        (
-            format!(
-                " {} · font: {} ",
-                env!("CARGO_PKG_NAME"),
-                app.config().font_family
-            ),
-            Style::new().fg(theme.muted),
-        )
-    };
+    if app.hooks_running() > 0 {
+        spans.push(Span::styled(
+            " ⚙ hook running ",
+            Style::new().fg(theme.warning),
+        ));
+    }
+    let (right, right_style) = timer_chip(app, theme);
     let used: usize = spans.iter().map(|s| s.content.chars().count()).sum();
-    let right_width = right.chars().count();
+    let right_width = right.chars().count().min(area.width as usize);
     if used + right_width > area.width as usize {
-        // The timer matters more than the hint: trim the hint.
+        // The timer chip matters more than the hint: trim the left part.
         let keep = (area.width as usize).saturating_sub(right_width);
         let mut left: String = spans.iter().map(|s| s.content.as_ref()).collect();
         left = left.chars().take(keep).collect();
@@ -150,6 +180,12 @@ fn draw_status_bar(frame: &mut Frame<'_>, app: &App, area: Rect, theme: &Theme) 
     let used: usize = spans.iter().map(|s| s.content.chars().count()).sum();
     let pad = (area.width as usize).saturating_sub(used + right_width);
     spans.push(Span::raw(" ".repeat(pad)));
+    app.ui.timer_chip = Rect {
+        x: area.x + area.width.saturating_sub(right_width as u16),
+        y: area.y,
+        width: right_width as u16,
+        height: 1,
+    };
     spans.push(Span::styled(right, right_style));
     frame.render_widget(
         Paragraph::new(Line::from(spans)).style(Style::new().bg(theme.bar_bg)),

@@ -4,6 +4,38 @@
 
 use std::time::{Duration, Instant};
 
+use serde::{Deserialize, Serialize};
+
+/// Why a paused timer has time it did not count.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub enum Away {
+    /// No key press or click for a while.
+    Idle,
+    /// pahiri was not running.
+    Closed,
+}
+
+/// A timer as saved in `session.json`.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct SavedTimer {
+    /// Task id.
+    pub task_id: String,
+    /// Checkpoint title.
+    pub checkpoint: Option<String>,
+    /// Checkpoint position when started.
+    pub checkpoint_index: Option<usize>,
+    /// Budget in seconds.
+    pub budget_secs: u64,
+    /// Counted seconds.
+    pub elapsed_secs: u64,
+    /// Seconds already booked.
+    pub flushed_secs: u64,
+    /// Whether it was counting when saved.
+    pub running: bool,
+    /// Wall clock when saved (epoch seconds).
+    pub saved_at: u64,
+}
+
 /// A running or paused timer.
 #[derive(Debug, Clone)]
 pub struct Timer {
@@ -11,6 +43,8 @@ pub struct Timer {
     pub task_id: String,
     /// Checkpoint title, or `None` for a plain focus block.
     pub checkpoint: Option<String>,
+    /// Position of the checkpoint when the timer started (titles can repeat).
+    pub checkpoint_index: Option<usize>,
     /// Time budget for this run.
     pub budget: Duration,
     running_since: Option<Instant>,
@@ -18,6 +52,10 @@ pub struct Timer {
     flushed: Duration,
     /// Whether the expiry alarm already fired for the current budget.
     pub expired: bool,
+    /// Whether the timer menu was opened since the alarm (stops the blinking).
+    pub acknowledged: bool,
+    /// Time not counted while paused by the idle check or while pahiri was closed.
+    pub away: Option<(Duration, Away)>,
 }
 
 impl Timer {
@@ -36,7 +74,66 @@ impl Timer {
             banked: Duration::ZERO,
             flushed: Duration::ZERO,
             expired: false,
+            acknowledged: false,
+            away: None,
+            checkpoint_index: None,
         }
+    }
+
+    /// Snapshot for `session.json`.
+    pub fn save(&self, now: Instant, now_secs: u64) -> SavedTimer {
+        SavedTimer {
+            task_id: self.task_id.clone(),
+            checkpoint: self.checkpoint.clone(),
+            checkpoint_index: self.checkpoint_index,
+            budget_secs: self.budget.as_secs(),
+            elapsed_secs: self.elapsed(now).as_secs(),
+            flushed_secs: self.flushed.as_secs(),
+            running: self.is_running(),
+            saved_at: now_secs,
+        }
+    }
+
+    /// Rebuild a saved timer, paused. If it was running, the time pahiri was
+    /// closed is offered as "away" (count it or not when resuming).
+    pub fn restore(saved: &SavedTimer, now_secs: u64) -> Self {
+        let away = saved.running.then(|| {
+            (
+                Duration::from_secs(now_secs.saturating_sub(saved.saved_at)),
+                Away::Closed,
+            )
+        });
+        Self {
+            task_id: saved.task_id.clone(),
+            checkpoint: saved.checkpoint.clone(),
+            checkpoint_index: saved.checkpoint_index,
+            budget: Duration::from_secs(saved.budget_secs),
+            running_since: None,
+            banked: Duration::from_secs(saved.elapsed_secs),
+            flushed: Duration::from_secs(saved.flushed_secs.min(saved.elapsed_secs)),
+            expired: saved.elapsed_secs >= saved.budget_secs,
+            acknowledged: true,
+            away: away.filter(|(d, _)| d.as_secs() >= 60),
+        }
+    }
+
+    /// Pause as of `at` (earlier than now, e.g. the last key press) and note the gap.
+    pub fn pause_idle(&mut self, at: Instant, now: Instant) {
+        if let Some(s) = self.running_since.take() {
+            let at = at.max(s);
+            self.banked += at.saturating_duration_since(s);
+            self.away = Some((now.saturating_duration_since(at), Away::Idle));
+        }
+    }
+
+    /// Resume; `count_away` adds the time spent away to the counted time.
+    pub fn resume_with(&mut self, now: Instant, count_away: bool) {
+        if let Some((d, _)) = self.away.take() {
+            if count_away {
+                self.banked += d;
+            }
+        }
+        self.resume(now);
     }
 
     /// Total time counted so far.
@@ -75,6 +172,12 @@ impl Timer {
     pub fn extend(&mut self, minutes: u64) {
         self.budget += Duration::from_secs(minutes * 60);
         self.expired = false;
+        self.acknowledged = false;
+    }
+
+    /// Whether time is up and nobody looked at the timer yet.
+    pub fn alarming(&self) -> bool {
+        self.expired && !self.acknowledged
     }
 
     /// `true` exactly once, when a running timer runs out.
@@ -83,6 +186,7 @@ impl Timer {
             return false;
         }
         self.expired = true;
+        self.acknowledged = false;
         true
     }
 
@@ -112,10 +216,11 @@ impl Timer {
         } else {
             format!("{} over", clock(r.unsigned_abs()))
         };
-        if self.is_running() {
-            text
-        } else {
-            format!("paused · {text}")
+        match (self.is_running(), self.away) {
+            (true, _) => text,
+            (false, Some((d, Away::Idle))) => format!("idle {} · {text}", clock(d.as_secs())),
+            (false, Some((d, Away::Closed))) => format!("closed {} · {text}", clock(d.as_secs())),
+            (false, None) => format!("paused · {text}"),
         }
     }
 
@@ -166,7 +271,21 @@ mod tests {
         assert_eq!(t.take_minutes(at(1100), true), 0);
         t.extend(5);
         assert!(!t.expired);
-        assert_eq!(clock(3725), "1:02:05");
+        // Idle pause at the last input, then resume counting the gap or not.
         assert_eq!(t.what(), "A");
+        let mut t = Timer::start("T", None, Duration::from_secs(600), t0);
+        t.pause_idle(at(60), at(360));
+        assert_eq!(t.elapsed(at(400)), Duration::from_secs(60));
+        assert_eq!(t.label(at(400)), "idle 05:00 · 09:00 left");
+        t.resume_with(at(400), true);
+        assert_eq!(t.elapsed(at(400)), Duration::from_secs(360));
+        // Save and restore.
+        let saved = t.save(at(460), 1_000);
+        assert_eq!(saved.elapsed_secs, 420);
+        let r = Timer::restore(&saved, 1_000 + 3_600);
+        assert!(!r.is_running());
+        assert_eq!(r.away, Some((Duration::from_secs(3_600), Away::Closed)));
+        assert_eq!(r.elapsed(at(99_999)), Duration::from_secs(420));
+        assert_eq!(clock(3725), "1:02:05");
     }
 }

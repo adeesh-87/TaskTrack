@@ -56,6 +56,11 @@ enum Cmd {
         #[arg(long)]
         json: bool,
     },
+    /// Manage deleted tasks in <tasks>/.trash.
+    Trash {
+        #[command(subcommand)]
+        cmd: TrashCmd,
+    },
     /// Write the bundled agent skills to DIR/<name>/SKILL.md
     /// (e.g. ~/.claude/skills or <tasks>/.agents/skills).
     InstallSkills {
@@ -88,11 +93,39 @@ enum TaskCmd {
         #[arg(required = true)]
         message: Vec<String>,
     },
+    /// Move the task to another board column (records started / finished).
+    Move {
+        /// Task id (default $PAHIRI_TASK).
+        #[arg(long)]
+        task: Option<String>,
+        /// Column name (any case) or 0-based index.
+        #[arg(long)]
+        to: String,
+    },
+    /// Append a line to the task's ## Outcome (for reviews).
+    Outcome {
+        /// Task id (default $PAHIRI_TASK).
+        #[arg(long)]
+        task: Option<String>,
+        /// The outcome.
+        #[arg(required = true)]
+        text: Vec<String>,
+    },
     /// Print the current checkpoint.
     Next {
         /// Task id (default $PAHIRI_TASK).
         #[arg(long)]
         task: Option<String>,
+    },
+}
+
+#[derive(Debug, Subcommand)]
+enum TrashCmd {
+    /// Delete trashed tasks older than the given age.
+    Empty {
+        /// Age in days, e.g. 30d.
+        #[arg(long, default_value = "30d")]
+        older_than: String,
     },
 }
 
@@ -116,8 +149,15 @@ fn run_command(cmd: Cmd, config: Option<&Config>, config_path: &std::path::Path)
                 cli::task_log(cfg, &cli::resolve_task(task)?, &message.join(" "))?
             }
             TaskCmd::Next { task } => cli::task_next(cfg, &cli::resolve_task(task)?)?,
+            TaskCmd::Move { task, to } => cli::task_move(cfg, &cli::resolve_task(task)?, &to)?,
+            TaskCmd::Outcome { task, text } => {
+                cli::task_outcome(cfg, &cli::resolve_task(task)?, &text.join(" "))?
+            }
         },
         Cmd::Report { from, to, json } => cli::report(cfg, from.as_deref(), to.as_deref(), json)?,
+        Cmd::Trash {
+            cmd: TrashCmd::Empty { older_than },
+        } => cli::trash_empty(cfg, &older_than)?,
         Cmd::InstallSkills { .. } => unreachable!("handled above"),
     };
     println!("{out}");

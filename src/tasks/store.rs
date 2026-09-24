@@ -3,6 +3,7 @@
 use std::fs;
 use std::io;
 use std::path::{Path, PathBuf};
+use std::time::SystemTime;
 
 use thiserror::Error;
 
@@ -57,6 +58,12 @@ pub struct TaskStore {
     context_file: String,
     categories: Vec<String>,
     board: Board,
+    /// Modification time of the board file when pahiri last read or wrote it.
+    status_mtime: Option<SystemTime>,
+}
+
+fn mtime(path: &Path) -> Option<SystemTime> {
+    fs::metadata(path).and_then(|m| m.modified()).ok()
 }
 
 impl TaskStore {
@@ -80,11 +87,13 @@ impl TaskStore {
             context_file: context_file.to_owned(),
             categories: categories.to_vec(),
             board: Board::parse(&text, categories),
+            status_mtime: None,
         };
         let existed = !text.is_empty();
         if store.refresh()? || !existed {
             store.save()?;
         }
+        store.status_mtime = mtime(&store.status_path);
         Ok(store)
     }
 
@@ -110,9 +119,45 @@ impl TaskStore {
     }
 
     /// Persist the board file.
-    pub fn save(&self) -> Result<(), StoreError> {
+    pub fn save(&mut self) -> Result<(), StoreError> {
         fs::write(&self.status_path, self.board.render())
-            .map_err(|e| io_err(format!("writing {}", self.status_path.display()), e))
+            .map_err(|e| io_err(format!("writing {}", self.status_path.display()), e))?;
+        self.status_mtime = mtime(&self.status_path);
+        Ok(())
+    }
+
+    /// Re-read the board when the file or the task folders changed outside
+    /// pahiri (a hook, `pahiri task move`, an editor). Returns whether it did.
+    pub fn reload_if_changed(&mut self) -> Result<bool, StoreError> {
+        let changed_file = mtime(&self.status_path) != self.status_mtime;
+        let ids = discover(&self.tasks_dir)?;
+        let mut known: Vec<String> = self
+            .board
+            .columns
+            .iter()
+            .flat_map(|c| c.tasks.iter().cloned())
+            .collect();
+        known.sort();
+        if !changed_file && known == ids {
+            return Ok(false);
+        }
+        if changed_file {
+            let text = fs::read_to_string(&self.status_path).unwrap_or_default();
+            self.board = Board::parse(&text, &self.categories);
+        }
+        if self.board.reconcile(&ids) || changed_file {
+            self.save()?;
+        }
+        Ok(true)
+    }
+
+    /// Move a task up or down within its column and save.
+    pub fn shift_task(&mut self, id: &str, delta: i32) -> Result<bool, StoreError> {
+        let moved = self.board.shift(id, delta);
+        if moved {
+            self.save()?;
+        }
+        Ok(moved)
     }
 
     /// Summary of a task by id.
@@ -208,6 +253,50 @@ impl TaskStore {
     }
 }
 
+/// Delete trashed tasks older than `days` days (by the timestamp pahiri put in
+/// the folder name). Returns the folders removed.
+pub fn empty_trash(tasks_dir: &Path, days: u64, now_secs: u64) -> io::Result<Vec<PathBuf>> {
+    let trash = tasks_dir.join(TRASH_DIR);
+    let mut removed = Vec::new();
+    let Ok(entries) = fs::read_dir(&trash) else {
+        return Ok(removed);
+    };
+    for entry in entries.filter_map(Result::ok) {
+        let name = entry.file_name().to_string_lossy().into_owned();
+        let Some(when) = trash_stamp(&name) else {
+            continue;
+        };
+        if now_secs.saturating_sub(when) >= days * 86_400 {
+            let path = entry.path();
+            if path.is_dir() {
+                fs::remove_dir_all(&path)?;
+            } else {
+                fs::remove_file(&path)?;
+            }
+            removed.push(path);
+        }
+    }
+    removed.sort();
+    Ok(removed)
+}
+
+/// Epoch seconds from the `-YYYYMMDDHHMMSS[-n]` suffix of a trashed folder.
+fn trash_stamp(name: &str) -> Option<u64> {
+    let digits = name
+        .rsplit('-')
+        .find(|p| p.len() == 14 && p.bytes().all(|b| b.is_ascii_digit()))?;
+    let ts = format!(
+        "{}-{}-{}T{}:{}:{}Z",
+        &digits[..4],
+        &digits[4..6],
+        &digits[6..8],
+        &digits[8..10],
+        &digits[10..12],
+        &digits[12..14]
+    );
+    crate::time::parse_rfc3339(&ts)
+}
+
 /// List task folders (non-hidden directories) sorted by name.
 pub fn discover(tasks_dir: &Path) -> Result<Vec<String>, StoreError> {
     let entries = fs::read_dir(tasks_dir)
@@ -290,6 +379,42 @@ mod tests {
         assert!(store.move_task("new-task", 2).unwrap());
         let again = TaskStore::open(dir.path(), "status.md", "CONTEXT.md", &cats()).unwrap();
         assert_eq!(again.board().locate("new-task"), Some((2, 0)));
+    }
+
+    #[test]
+    fn outside_changes_are_picked_up_and_trash_is_emptied() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut store = TaskStore::open(dir.path(), "status.md", "CONTEXT.md", &cats()).unwrap();
+        store.create_task("a", 0).unwrap();
+        store.create_task("b", 0).unwrap();
+        assert!(!store.reload_if_changed().unwrap());
+        assert!(store.shift_task("b", -1).unwrap());
+        assert_eq!(store.board().columns[0].tasks, vec!["b", "a"]);
+        // Someone else moves a task and adds a folder.
+        std::thread::sleep(std::time::Duration::from_millis(20));
+        fs::write(
+            dir.path().join("status.md"),
+            "## Done\n- a\n## Planned\n- b\n",
+        )
+        .unwrap();
+        fs::create_dir(dir.path().join("c")).unwrap();
+        assert!(store.reload_if_changed().unwrap());
+        assert_eq!(store.board().locate("a"), Some((2, 0)));
+        assert_eq!(store.board().columns[0].tasks, vec!["b", "c"]);
+
+        let old = store.trash_task("c").unwrap();
+        let now = crate::time::now_secs();
+        assert!(empty_trash(dir.path(), 30, now).unwrap().is_empty());
+        assert_eq!(empty_trash(dir.path(), 0, now).unwrap(), vec![old]);
+        assert_eq!(
+            trash_stamp("x-20260101000000"),
+            crate::time::parse_rfc3339("2026-01-01")
+        );
+        assert_eq!(
+            trash_stamp("x-20260101000000-2"),
+            crate::time::parse_rfc3339("2026-01-01")
+        );
+        assert_eq!(trash_stamp("x"), None);
     }
 
     #[test]

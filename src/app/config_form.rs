@@ -75,6 +75,24 @@ pub enum FieldKey {
     TimerFlash,
     /// Bell on timer end.
     TimerBell,
+    /// Idle pause minutes.
+    IdleMinutes,
+    /// Hooks, `event = command`.
+    Hooks,
+    /// Hook timeout.
+    HookTimeout,
+    /// Gerrit status command.
+    GerritStatus,
+    /// Archive finished tasks after N days.
+    ArchiveDays,
+    /// Soft wrap in the editor.
+    SoftWrap,
+    /// Reopen shells after a restart.
+    RestoreShells,
+    /// Run shells inside tmux.
+    ShellTmux,
+    /// Key overrides.
+    Keys,
 }
 
 /// A field's value and editing behaviour.
@@ -264,10 +282,28 @@ impl ConfigForm {
                 Value::List(cfg.task_sources.iter().map(|t| format!("{} = {}", t.name, t.command)).collect()),
             ),
             field(
+                FieldKey::Hooks,
+                "Hooks",
+                "`event = command`, e.g. `task_enter = ~/bin/on-enter.sh` or `timer_expire = notify-send pahiri done`. ? lists events and variables.",
+                Value::List(cfg.hooks.iter().map(|(k, v)| format!("{k} = {v}")).collect()),
+            ),
+            field(
+                FieldKey::HookTimeout,
+                "Hook timeout (s)",
+                "Give up on a hook after this many seconds.",
+                Value::Number(cfg.hook_timeout_secs.to_string()),
+            ),
+            field(
                 FieldKey::GerritUrl,
                 "Gerrit URL",
                 "Web URL of your Gerrit, e.g. https://review.example.com. Empty: derived from each workspace's origin remote. Used by Esc g.",
                 Value::Text(cfg.gerrit_url.clone()),
+            ),
+            field(
+                FieldKey::GerritStatus,
+                "Gerrit status command",
+                "Optional. Gets the Change-Ids as arguments and prints JSON lines {change_id, number, status, url, labels}. ? shows the format.",
+                Value::Text(cfg.gerrit_status_command.clone()),
             ),
             field(
                 FieldKey::AgentCommand,
@@ -336,6 +372,12 @@ impl ConfigForm {
                 Value::Number(cfg.timer.focus_minutes.to_string()),
             ),
             field(
+                FieldKey::IdleMinutes,
+                "Idle pause (min)",
+                "Pause the timer after this many minutes without a key press or click (0: never). You choose whether the gap counts.",
+                Value::Number(cfg.timer.idle_minutes.to_string()),
+            ),
+            field(
                 FieldKey::TimerFlash,
                 "Flash when time is up",
                 "Flash the whole screen when a checkpoint's time runs out.",
@@ -346,6 +388,12 @@ impl ConfigForm {
                 "Bell when time is up",
                 "Ring the terminal bell (many terminals turn it into a notification).",
                 Value::Toggle(cfg.timer.bell),
+            ),
+            field(
+                FieldKey::ArchiveDays,
+                "Archive after (days)",
+                "Hide tasks finished more than this many days ago (A in the list shows them; 0: never).",
+                Value::Number(cfg.archive_after_days.to_string()),
             ),
             field(
                 FieldKey::ColorScheme,
@@ -366,10 +414,28 @@ impl ConfigForm {
                 Value::Text(cfg.shell.args.join(" ")),
             ),
             field(
+                FieldKey::RestoreShells,
+                "Restore shells",
+                "Reopen each task's shells, in the same folders, after pahiri restarts.",
+                Value::Toggle(cfg.restore_shells),
+            ),
+            field(
+                FieldKey::ShellTmux,
+                "Shells in tmux",
+                "Run every shell in its own tmux session so programs keep running when pahiri exits (needs tmux ≥ 3.0).",
+                Value::Toggle(cfg.shell.tmux),
+            ),
+            field(
                 FieldKey::LeaderKey,
                 "Leader key",
                 "Prefix intercepted while a shell has focus (tmux style). Press it twice to send it through.",
                 Value::Text(cfg.leader_key.clone()),
+            ),
+            field(
+                FieldKey::Keys,
+                "Key overrides",
+                "`palette.<action> = x` or `leader.<command> = x`, e.g. `palette.timer = u`. ? lists every name.",
+                Value::List(cfg.keys.iter().map(|(k, v)| format!("{k} = {v}")).collect()),
             ),
             field(
                 FieldKey::FontFamily,
@@ -400,6 +466,12 @@ impl ConfigForm {
                 "Syntax highlighting",
                 "Colour C, C++, Rust, Bash, Python, CMake, Makefiles, logs and Markdown in the editor.",
                 Value::Toggle(cfg.syntax_highlighting),
+            ),
+            field(
+                FieldKey::SoftWrap,
+                "Soft wrap",
+                "Wrap long lines of Markdown and plain text in the editor.",
+                Value::Toggle(cfg.soft_wrap),
             ),
             field(
                 FieldKey::TabWidth,
@@ -855,6 +927,50 @@ impl ConfigForm {
                 },
                 (FieldKey::TimerFlash, Value::Toggle(b)) => cfg.timer.flash = *b,
                 (FieldKey::TimerBell, Value::Toggle(b)) => cfg.timer.bell = *b,
+                (FieldKey::IdleMinutes, Value::Number(v)) => match v.trim().parse() {
+                    Ok(n) => cfg.timer.idle_minutes = n,
+                    Err(_) => errors.push(format!("idle pause must be a number, got {v:?}")),
+                },
+                (FieldKey::Hooks, Value::List(items)) => {
+                    cfg.hooks.clear();
+                    for item in items {
+                        match item.split_once('=') {
+                            Some((k, v)) => {
+                                cfg.hooks.insert(k.trim().to_owned(), v.trim().to_owned());
+                            }
+                            None => {
+                                errors.push(format!("hook {item:?}: expected `event = command`"));
+                            }
+                        }
+                    }
+                }
+                (FieldKey::HookTimeout, Value::Number(v)) => match v.trim().parse() {
+                    Ok(n) => cfg.hook_timeout_secs = n,
+                    Err(_) => errors.push(format!("hook timeout must be a number, got {v:?}")),
+                },
+                (FieldKey::GerritStatus, Value::Text(v)) => {
+                    v.trim().clone_into(&mut cfg.gerrit_status_command);
+                }
+                (FieldKey::ArchiveDays, Value::Number(v)) => match v.trim().parse() {
+                    Ok(n) => cfg.archive_after_days = n,
+                    Err(_) => errors.push(format!("archive days must be a number, got {v:?}")),
+                },
+                (FieldKey::SoftWrap, Value::Toggle(b)) => cfg.soft_wrap = *b,
+                (FieldKey::RestoreShells, Value::Toggle(b)) => cfg.restore_shells = *b,
+                (FieldKey::ShellTmux, Value::Toggle(b)) => cfg.shell.tmux = *b,
+                (FieldKey::Keys, Value::List(items)) => {
+                    cfg.keys.clear();
+                    for item in items {
+                        match item.split_once('=') {
+                            Some((k, v)) => {
+                                cfg.keys.insert(k.trim().to_owned(), v.trim().to_owned());
+                            }
+                            None => errors.push(format!(
+                                "key override {item:?}: expected `palette.<action> = x`"
+                            )),
+                        }
+                    }
+                }
                 _ => {}
             }
         }

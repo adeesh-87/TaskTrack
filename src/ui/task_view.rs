@@ -40,6 +40,42 @@ pub fn draw_next_up(frame: &mut Frame<'_>, app: &App, area: Rect, theme: &Theme)
         lines.push(Line::raw(""));
     }
 
+    let today = app.today();
+    if today.week_min > 0 || today.finished_week > 0 || today.estimate_factor.is_some() {
+        let fm = crate::tasks::checkpoints::fmt_minutes;
+        lines.push(Line::styled(" Today", bold));
+        let per: Vec<String> = today
+            .today_by_task
+            .iter()
+            .take(4)
+            .map(|(t, m)| format!("{t} {}", fm(*m)))
+            .collect();
+        lines.push(Line::from(vec![
+            Span::styled(
+                format!("  {} booked", fm(today.today_min)),
+                Style::new().fg(theme.accent),
+            ),
+            Span::styled(
+                if per.is_empty() {
+                    String::new()
+                } else {
+                    format!(" · {}", per.join(" · "))
+                },
+                muted,
+            ),
+        ]));
+        let mut week = format!(
+            "  this week {} · {} finished",
+            fm(today.week_min),
+            today.finished_week
+        );
+        if let Some((f, n)) = today.estimate_factor {
+            let _ = write!(week, " · estimates × {f:.2} (from {n} checkpoints)");
+        }
+        lines.push(Line::styled(week, muted));
+        lines.push(Line::raw(""));
+    }
+
     let records = app.next_up();
     if records.is_empty() {
         lines.push(Line::styled(" Nothing open.", muted));
@@ -104,7 +140,7 @@ pub fn draw_next_up(frame: &mut Frame<'_>, app: &App, area: Rect, theme: &Theme)
     }
     lines.push(Line::raw(""));
     lines.push(Line::styled(
-        " Enter opens · m starts the timer · v ticks a checkpoint · Esc commands",
+        " Enter opens · m timer · v ticks a checkpoint · J/K priority · F1 help",
         muted,
     ));
     frame.render_widget(Paragraph::new(lines).wrap(Wrap { trim: false }), inner);
@@ -317,9 +353,36 @@ fn styled_line<'a>(
     (out, next)
 }
 
+/// Split an expanded line into chunks of at most `width` chars (soft wrap).
+fn wrap_chunks(expanded: &str, width: usize) -> Vec<(usize, usize)> {
+    let n = expanded.chars().count();
+    if width == 0 || n <= width {
+        return vec![(0, n)];
+    }
+    let chars: Vec<char> = expanded.chars().collect();
+    let mut out = Vec::new();
+    let mut start = 0;
+    while start < n {
+        let mut end = (start + width).min(n);
+        if end < n {
+            // Break after the last space in the chunk when there is one.
+            if let Some(sp) = chars[start..end].iter().rposition(|c| *c == ' ') {
+                if sp > 0 {
+                    end = start + sp + 1;
+                }
+            }
+        }
+        out.push((start, end));
+        start = end;
+    }
+    out
+}
+
+#[allow(clippy::too_many_lines)]
 fn draw_editor(frame: &mut Frame<'_>, app: &mut App, area: Rect, theme: &Theme) {
     let tab_width = usize::from(app.config().tab_width.max(1));
     let highlighting = app.config().syntax_highlighting;
+    let soft_wrap = app.config().soft_wrap;
     let Some(ctx) = app.active_context_mut() else {
         return;
     };
@@ -359,10 +422,11 @@ fn draw_editor(frame: &mut Frame<'_>, app: &mut App, area: Rect, theme: &Theme) 
     } else {
         ctx.highlight = None;
     }
-    let Some(ed) = &ctx.editor else { return };
     let language = ctx.highlight.as_ref().map(|h| h.language);
+    let wrap = soft_wrap && matches!(language, None | Some(Language::Markdown));
     let title_lang = language.map_or(String::new(), |l| format!(" {l:?} ").to_lowercase());
-
+    let Some(ed) = &mut ctx.editor else { return };
+    let height = inner.height as usize;
     let gutter = (ed.lines().len().max(1).to_string().len() + 1) as u16;
     let text_width = inner.width.saturating_sub(gutter + 1) as usize;
     let (crow, ccol) = ed.cursor();
@@ -371,7 +435,29 @@ fn draw_editor(frame: &mut Frame<'_>, app: &mut App, area: Rect, theme: &Theme) 
         ccol,
         tab_width,
     );
-    let hscroll = if text_width == 0 {
+
+    // With wrapping, scroll further so the cursor's wrapped row is visible.
+    let chunk_count = |ed: &crate::editor::Buffer, i: usize| {
+        wrap_chunks(&expand_tabs(&ed.lines()[i], tab_width), text_width).len()
+    };
+    let cursor_chunk = |ed: &crate::editor::Buffer| {
+        let chunks = wrap_chunks(&expand_tabs(&ed.lines()[crow], tab_width), text_width);
+        chunks
+            .iter()
+            .position(|(s, e)| cursor_disp >= *s && cursor_disp < *e)
+            .unwrap_or(chunks.len().saturating_sub(1))
+    };
+    if wrap {
+        loop {
+            let above: usize = (ed.scroll()..crow).map(|i| chunk_count(ed, i)).sum();
+            if above + cursor_chunk(ed) < height || ed.scroll() >= crow {
+                break;
+            }
+            let next = ed.scroll() + 1;
+            ed.set_scroll(next);
+        }
+    }
+    let hscroll = if wrap || text_width == 0 {
         0
     } else {
         cursor_disp.saturating_sub(text_width.saturating_sub(1))
@@ -383,24 +469,47 @@ fn draw_editor(frame: &mut Frame<'_>, app: &mut App, area: Rect, theme: &Theme) 
         .as_ref()
         .and_then(|h| h.states.get(first).copied())
         .unwrap_or_default();
-    let lines: Vec<Line<'_>> = ed
-        .lines()
-        .iter()
-        .enumerate()
-        .skip(first)
-        .take(inner.height as usize)
-        .map(|(i, l)| {
-            let expanded = expand_tabs(l, tab_width);
-            let (spans, next) = styled_line(&expanded, language, state, hscroll, text_width, theme);
-            state = next;
-            let mut all = vec![Span::styled(
-                format!("{:>w$} ", i + 1, w = gutter as usize - 1),
-                Style::new().fg(theme.muted),
-            )];
+    let Some(ed) = &ctx.editor else { return };
+    let mut lines: Vec<Line<'_>> = Vec::new();
+    let mut rows: Vec<(usize, usize)> = Vec::new();
+    let mut cursor_pos: Option<(u16, u16)> = None;
+    for (i, l) in ed.lines().iter().enumerate().skip(first) {
+        if lines.len() >= height {
+            break;
+        }
+        let expanded = expand_tabs(l, tab_width);
+        let chunks = if wrap {
+            wrap_chunks(&expanded, text_width)
+        } else {
+            vec![(hscroll, hscroll + text_width)]
+        };
+        let line_state = state;
+        let mut next_state = state;
+        for (ci, (start, end)) in chunks.iter().enumerate() {
+            if lines.len() >= height {
+                break;
+            }
+            let (spans, next) =
+                styled_line(&expanded, language, line_state, *start, end - start, theme);
+            next_state = next;
+            let number = if ci == 0 {
+                format!("{:>w$} ", i + 1, w = gutter as usize - 1)
+            } else {
+                format!("{:>w$} ", "·", w = gutter as usize - 1)
+            };
+            let mut all = vec![Span::styled(number, Style::new().fg(theme.muted))];
             all.extend(spans);
-            Line::from(all)
-        })
-        .collect();
+            if i == crow {
+                let last = ci + 1 == chunks.len();
+                if cursor_disp >= *start && (cursor_disp < *end || last) {
+                    cursor_pos = Some(((cursor_disp - start) as u16, lines.len() as u16));
+                }
+            }
+            rows.push((i, *start));
+            lines.push(Line::from(all));
+        }
+        state = next_state;
+    }
     frame.render_widget(Paragraph::new(lines), inner);
     if !title_lang.is_empty() {
         let w = title_lang.chars().count() as u16;
@@ -419,15 +528,18 @@ fn draw_editor(frame: &mut Frame<'_>, app: &mut App, area: Rect, theme: &Theme) 
     }
 
     if focused {
-        let y = inner.y + (crow - ed.scroll()) as u16;
-        let x = inner.x + gutter + (cursor_disp - hscroll) as u16;
-        if y < inner.y + inner.height && x < inner.x + inner.width {
-            frame.set_cursor_position(Position::new(x, y));
+        if let Some((cx, cy)) = cursor_pos {
+            let x = inner.x + gutter + cx;
+            let y = inner.y + cy;
+            if y < inner.y + inner.height && x < inner.x + inner.width {
+                frame.set_cursor_position(Position::new(x, y));
+            }
         }
     }
     app.ui.editor = inner;
     app.ui.editor_gutter = gutter;
     app.ui.editor_hscroll = hscroll;
+    app.ui.editor_rows = rows;
     app.set_editor_height(inner.height as usize);
 }
 

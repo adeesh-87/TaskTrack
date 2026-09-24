@@ -186,20 +186,31 @@ send("\x1b"); send("b", 0.5)
 wait_for("written to ## Checkpoints")
 dump("ai checkpoints", "Flux the capacitor")
 send("\r", 0.5)
-send("\x1b"); send("m", 0.2)                   # timer on "Tiny warm-up": no time left
+send("\x1b"); send("m", 0.5)                   # timer menu
+dump("timer menu", "start: Tiny warm-up")
+send("1", 0.1)                                 # start it: no time left on it
 flashed = False
 end = time.time() + 3
 while time.time() < end and not flashed:
     pump(0.05)
     flashed = any(screen.buffer[y][x].reverse for y in range(ROWS) for x in range(0, COLS, 7))
-wait_for("Time's up")
-dump("time's up", "done — start next: Flux the capacitor")
+wait_for("TIME'S UP")
+dump("time's up (no popup, chip blinks)", "TIME'S UP")
 if not flashed:
     failures.append("screen did not flash")
-send("1", 0.8)                                 # done → next checkpoint, timer running
+if "done → next" in text():
+    failures.append("time's up must not open a popup")
+send("\x1b"); send("m", 0.5)                   # open the timer menu yourself
+dump("timer menu after alarm", "done → next: Flux the capacitor")
+send("1", 0.8)                                 # done → next checkpoint
 dump("timer running", "Flux the capacitor")
 if "⏱ PROJ-42" not in text():
-    failures.append("timer not shown in the status bar")
+    failures.append("timer chip does not show the running timer")
+send("\x1bOP", 0.8)                            # F1: help page
+dump("help page", "pahiri help")
+send("\x1b[C", 0.5); send("\x1b[C", 0.5); send("\x1b[C", 0.5)   # → Hooks tab
+dump("help: hooks", "PAHIRI_PREV_TASK")
+send("q", 0.5)
 send("\x1b"); send("M", 0.5)                   # stop and book
 send("\x1b"); send("T", 0.8)
 send("\x1b"); send("q", 0.5)                   # quit → confirm (shell running)

@@ -11,9 +11,11 @@ use anyhow::{bail, Context as _, Result};
 
 use crate::config::Config;
 use crate::tasks::checkpoints::{self, fmt_minutes};
-use crate::tasks::context::{append_log, set_context_ready};
+use crate::tasks::context::{
+    append_log, append_under, record_move, set_context_ready, OUTCOME_HEADING,
+};
 use crate::tasks::record::TaskRecord;
-use crate::tasks::store::{discover, is_valid_id};
+use crate::tasks::store::{discover, empty_trash, is_valid_id, TaskStore};
 use crate::tasks::Board;
 use crate::time::now_rfc3339;
 
@@ -77,6 +79,63 @@ pub fn task_log(cfg: &Config, id: &str, message: &str) -> Result<String> {
     append_log(&path, id, &now_rfc3339(), message.trim())
         .with_context(|| format!("updating {}", path.display()))?;
     Ok(format!("{id}: logged"))
+}
+
+/// `pahiri task outcome <text>`.
+pub fn task_outcome(cfg: &Config, id: &str, text: &str) -> Result<String> {
+    if text.trim().is_empty() {
+        bail!("empty outcome");
+    }
+    let path = context_path(cfg, id)?;
+    append_under(&path, id, OUTCOME_HEADING, &now_rfc3339(), text.trim())
+        .with_context(|| format!("updating {}", path.display()))?;
+    Ok(format!("{id}: outcome recorded"))
+}
+
+/// `pahiri task move --to <column>` (name, case-insensitive, or 0-based index).
+pub fn task_move(cfg: &Config, id: &str, to: &str) -> Result<String> {
+    let path = context_path(cfg, id)?;
+    let mut store = TaskStore::open(
+        &cfg.tasks_dir,
+        &cfg.status_file,
+        &cfg.context_file,
+        &cfg.categories,
+    )?;
+    let cats = store.categories().to_vec();
+    let target = to
+        .trim()
+        .parse::<usize>()
+        .ok()
+        .filter(|i| *i < cats.len())
+        .or_else(|| cats.iter().position(|c| c.eq_ignore_ascii_case(to.trim())))
+        .with_context(|| format!("no column {to:?}; columns: {}", cats.join(", ")))?;
+    let from = store
+        .board()
+        .locate(id)
+        .map(|(c, _)| c)
+        .with_context(|| format!("{id} is not on the board"))?;
+    store.move_task(id, target)?;
+    record_move(&path, id, from, target, cats.len(), &now_rfc3339())?;
+    Ok(format!("{id}: {} → {}", cats[from], cats[target]))
+}
+
+/// `pahiri trash empty [--older-than 30d]`.
+pub fn trash_empty(cfg: &Config, older_than: &str) -> Result<String> {
+    let days: u64 = older_than
+        .trim()
+        .trim_end_matches('d')
+        .parse()
+        .with_context(|| format!("--older-than takes days, e.g. 30d, got {older_than:?}"))?;
+    let removed = empty_trash(&cfg.tasks_dir, days, crate::time::now_secs())?;
+    Ok(if removed.is_empty() {
+        format!("nothing in the trash older than {days} days")
+    } else {
+        removed
+            .iter()
+            .map(|p| format!("deleted {}", p.display()))
+            .collect::<Vec<_>>()
+            .join("\n")
+    })
 }
 
 /// `pahiri task next`: the current checkpoint and what is left.
@@ -231,6 +290,17 @@ mod tests {
             "T-1 · checkpoint 2/3: B (20m, spent 5m)\nthen: C (1h)"
         );
         assert!(task_ready(&c, "nope", true).is_err());
+        assert_eq!(task_move(&c, "T-1", "done").unwrap(), "T-1: Doing → Done");
+        let md = fs::read_to_string(dir.path().join("T-1/CONTEXT.md")).unwrap();
+        assert!(md.contains("- finished: "), "{md}");
+        assert!(task_move(&c, "T-1", "nowhere").is_err());
+        assert_eq!(task_move(&c, "T-1", "1").unwrap(), "T-1: Done → Doing");
+        task_outcome(&c, "T-1", "shipped it").unwrap();
+        assert!(fs::read_to_string(dir.path().join("T-1/CONTEXT.md"))
+            .unwrap()
+            .contains("## Outcome\n- "));
+        assert!(trash_empty(&c, "30d").unwrap().contains("nothing"));
+        assert!(trash_empty(&c, "x").is_err());
         assert!(task_log(&c, "T-1", " ").is_err());
 
         let md = report(&c, None, None, false).unwrap();

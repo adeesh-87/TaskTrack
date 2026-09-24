@@ -178,6 +178,107 @@ pub fn prepare(req: &PrepareRequest, log: &mut dyn FnMut(String)) -> Result<(), 
     Ok(())
 }
 
+/// Run git for a network operation: never prompt (batch-mode SSH unless the
+/// user set their own `GIT_SSH_COMMAND`), and return stdout + stderr.
+fn git_net(path: &Path, args: &[&str]) -> Result<String, GitError> {
+    let mut cmd = Command::new("git");
+    cmd.arg("-C")
+        .arg(path)
+        .args(args)
+        .env("GIT_TERMINAL_PROMPT", "0");
+    if std::env::var_os("GIT_SSH_COMMAND").is_none() {
+        cmd.env("GIT_SSH_COMMAND", "ssh -o BatchMode=yes");
+    }
+    let output = cmd
+        .output()
+        .map_err(|e| GitError::Spawn(path.to_path_buf(), e))?;
+    let text = format!(
+        "{}{}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    )
+    .trim_end()
+    .to_owned();
+    if output.status.success() {
+        Ok(text)
+    } else {
+        Err(GitError::Failed {
+            args: args.join(" "),
+            path: path.to_path_buf(),
+            stderr: text,
+        })
+    }
+}
+
+/// Whether the checkout has an `origin` remote.
+pub fn has_origin(path: &Path) -> bool {
+    git(path, &["remote", "get-url", "origin"]).is_ok()
+}
+
+/// `git fetch origin <branch>`.
+pub fn fetch_branch(path: &Path, branch: &str) -> Result<(), GitError> {
+    git_net(path, &["fetch", "-q", "origin", branch]).map(|_| ())
+}
+
+/// Seconds since the last fetch (from `FETCH_HEAD`), if there was one.
+pub fn last_fetch_age(path: &Path) -> Option<u64> {
+    let p = git(path, &["rev-parse", "--git-path", "FETCH_HEAD"]).ok()?;
+    let p = if Path::new(&p).is_absolute() {
+        PathBuf::from(p)
+    } else {
+        path.join(p)
+    };
+    let modified = std::fs::metadata(p).and_then(|m| m.modified()).ok()?;
+    modified.elapsed().ok().map(|d| d.as_secs())
+}
+
+/// Whether Gerrit's `commit-msg` hook (which adds `Change-Id`) is installed.
+pub fn has_change_id_hook(path: &Path) -> bool {
+    let Ok(p) = git(path, &["rev-parse", "--git-path", "hooks/commit-msg"]) else {
+        return false;
+    };
+    let p = if Path::new(&p).is_absolute() {
+        PathBuf::from(p)
+    } else {
+        path.join(p)
+    };
+    std::fs::read_to_string(p).is_ok_and(|t| t.contains("Change-Id"))
+}
+
+/// `git push origin HEAD:refs/for/<main>`; returns git's output (Gerrit prints the change URLs).
+pub fn push_for_review(path: &Path, main_branch: &str) -> Result<String, GitError> {
+    git_net(
+        path,
+        &["push", "origin", &format!("HEAD:refs/for/{main_branch}")],
+    )
+}
+
+/// Rebase the current branch onto the latest main (`origin/<main>` after a
+/// fetch when there is an origin). A conflicting rebase is aborted.
+pub fn rebase_on_main(path: &Path, main_branch: &str) -> Result<String, GitError> {
+    let state = inspect(path)?;
+    if state.dirty {
+        return Err(GitError::Failed {
+            args: "rebase".into(),
+            path: path.to_path_buf(),
+            stderr: "uncommitted changes; commit or stash them first".into(),
+        });
+    }
+    let onto = if has_origin(path) {
+        fetch_branch(path, main_branch)?;
+        format!("origin/{main_branch}")
+    } else {
+        main_branch.to_owned()
+    };
+    match git(path, &["rebase", "-q", &onto]) {
+        Ok(_) => Ok(format!("rebased '{}' onto {onto}", state.branch)),
+        Err(e) => {
+            let _ = git(path, &["rebase", "--abort"]);
+            Err(e)
+        }
+    }
+}
+
 /// Guess a checkout's main branch: `origin/HEAD` when the remote advertises
 /// it, else the first of `main`, `master`, `develop` that exists locally.
 pub fn detect_main_branch(path: &Path) -> Option<String> {
@@ -329,6 +430,46 @@ mod tests {
             gerrit_base_url(p).as_deref(),
             Some("https://review.example.com")
         );
+    }
+
+    #[test]
+    fn rebase_hook_check_and_push_errors() {
+        let dir = repo("main");
+        let p = dir.path();
+        assert!(!has_change_id_hook(p));
+        fs::write(
+            p.join(".git/hooks/commit-msg"),
+            "#!/bin/sh\n# adds Change-Id\n",
+        )
+        .unwrap();
+        assert!(has_change_id_hook(p));
+        git(p, &["switch", "-q", "-c", "T"]).unwrap();
+        fs::write(p.join("t.txt"), "t").unwrap();
+        git(p, &["add", "-A"]).unwrap();
+        git(p, &["commit", "-q", "-m", "task"]).unwrap();
+        git(p, &["switch", "-q", "main"]).unwrap();
+        fs::write(p.join("m.txt"), "m").unwrap();
+        git(p, &["add", "-A"]).unwrap();
+        git(p, &["commit", "-q", "-m", "main moved"]).unwrap();
+        git(p, &["switch", "-q", "T"]).unwrap();
+        assert!(rebase_on_main(p, "main").unwrap().contains("onto main"));
+        assert!(p.join("m.txt").exists());
+        // A conflict is aborted and reported.
+        fs::write(p.join("m.txt"), "task version").unwrap();
+        git(p, &["commit", "-qam", "conflict"]).unwrap();
+        git(p, &["switch", "-q", "main"]).unwrap();
+        fs::write(p.join("m.txt"), "main version").unwrap();
+        git(p, &["commit", "-qam", "main conflict"]).unwrap();
+        git(p, &["switch", "-q", "T"]).unwrap();
+        assert!(rebase_on_main(p, "main").is_err());
+        assert_eq!(inspect(p).unwrap().branch, "T");
+        fs::write(p.join("dirty"), "x").unwrap();
+        assert!(rebase_on_main(p, "main")
+            .unwrap_err()
+            .to_string()
+            .contains("uncommitted"));
+        assert!(push_for_review(p, "main").is_err(), "no origin");
+        assert!(last_fetch_age(p).is_none());
     }
 
     #[test]
