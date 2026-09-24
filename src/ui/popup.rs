@@ -1,0 +1,251 @@
+//! Modal dialog rendering.
+
+use ratatui::layout::{Constraint, Flex, Layout, Position, Rect};
+use ratatui::style::{Modifier, Style};
+use ratatui::text::{Line, Span};
+use ratatui::widgets::{Block, Clear, Paragraph, Wrap};
+use ratatui::Frame;
+
+use crate::app::popup::filter_tickets;
+use crate::app::Popup;
+
+use super::Theme;
+
+/// Centre a box of the given size inside `area`.
+pub fn centered(area: Rect, width: u16, height: u16) -> Rect {
+    let [v] = Layout::vertical([Constraint::Length(height)])
+        .flex(Flex::Center)
+        .areas(area);
+    let [h] = Layout::horizontal([Constraint::Length(width)])
+        .flex(Flex::Center)
+        .areas(v);
+    h
+}
+
+fn hint(text: &str, theme: &Theme) -> Line<'static> {
+    Line::styled(text.to_owned(), Style::new().fg(theme.muted))
+}
+
+/// Rows for a scrollable selection list, keeping `selected` visible.
+fn list_lines<'a>(
+    rows: impl Iterator<Item = Line<'a>>,
+    selected: usize,
+    max_rows: usize,
+) -> (Vec<Line<'a>>, usize) {
+    let all: Vec<Line<'a>> = rows.collect();
+    let first = selected
+        .saturating_sub(max_rows.saturating_sub(1))
+        .min(all.len().saturating_sub(max_rows));
+    let shown: Vec<Line<'a>> = all.into_iter().skip(first).take(max_rows).collect();
+    (shown, first)
+}
+
+/// Draw the popup over `area`.
+pub fn draw(frame: &mut Frame<'_>, popup: &Popup, area: Rect, theme: &Theme) {
+    let wide = matches!(
+        popup,
+        Popup::Log { .. }
+            | Popup::Tickets { .. }
+            | Popup::MultiSelect { .. }
+            | Popup::Palette(_)
+            | Popup::Choose { .. }
+    );
+    let width = if wide {
+        (area.width * 4 / 5).clamp(40.min(area.width), 120.min(area.width))
+    } else {
+        (area.width * 3 / 5).clamp(30.min(area.width), 90.min(area.width))
+    };
+    let max_list = (area.height as usize).saturating_sub(8).max(3);
+    let is_warning =
+        popup.title().to_uppercase().starts_with("WARNING") || popup.title().starts_with("Delete");
+    let title_style = if is_warning {
+        Style::new().fg(theme.warning).add_modifier(Modifier::BOLD)
+    } else {
+        Style::new().fg(theme.accent).add_modifier(Modifier::BOLD)
+    };
+    let sel = theme.selected(true);
+
+    let mut cursor: Option<(u16, u16)> = None;
+    let mut title = format!(" {} ", popup.title());
+    let lines: Vec<Line<'_>> = match popup {
+        Popup::Message { body, .. } => {
+            let mut lines: Vec<Line<'_>> = body.lines().map(|l| Line::raw(l.to_owned())).collect();
+            lines.push(Line::raw(""));
+            lines.push(hint("press any key", theme));
+            lines
+        }
+        Popup::Confirm { body, .. } => {
+            let mut lines: Vec<Line<'_>> = body.lines().map(|l| Line::raw(l.to_owned())).collect();
+            lines.push(Line::raw(""));
+            lines.push(Line::from(vec![
+                Span::styled("[y] yes / Enter", Style::new().fg(theme.accent)),
+                Span::raw("    "),
+                Span::styled("[n] no / Esc", Style::new().fg(theme.muted)),
+            ]));
+            lines
+        }
+        Popup::Input { label, value, .. } => {
+            cursor = Some((2 + value.chars().count() as u16, 1));
+            vec![
+                Line::styled(label.clone(), Style::new().fg(theme.muted)),
+                Line::from(vec![Span::raw("> "), Span::raw(value.clone())]),
+                Line::raw(""),
+                hint("Enter confirm · Esc cancel · Ctrl+U clear", theme),
+            ]
+        }
+        Popup::Choose {
+            choices, selected, ..
+        } => {
+            let rows = choices.iter().enumerate().map(|(i, c)| {
+                let style = if i == *selected { sel } else { Style::new() };
+                Line::styled(format!(" {} {}", i + 1, c.label), style)
+            });
+            let (mut lines, _) = list_lines(rows, *selected, max_list);
+            lines.push(Line::raw(""));
+            lines.push(hint("↑/↓ or number · Enter choose · Esc cancel", theme));
+            lines
+        }
+        Popup::MultiSelect {
+            items, selected, ..
+        } => {
+            let rows = items.iter().enumerate().map(|(i, it)| {
+                let style = if i == *selected { sel } else { Style::new() };
+                let mark = if it.checked { "[x]" } else { "[ ]" };
+                Line::styled(format!(" {mark} {}", it.label), style)
+            });
+            let (mut lines, _) = list_lines(rows, *selected, max_list);
+            if items.is_empty() {
+                lines.push(hint(" nothing to attach", theme));
+            }
+            lines.push(Line::raw(""));
+            lines.push(hint("Space toggle · Enter apply · Esc cancel", theme));
+            lines
+        }
+        Popup::Tickets {
+            source,
+            tickets,
+            filter,
+            selected,
+        } => {
+            let filtered = filter_tickets(tickets, filter);
+            title = format!(
+                " new task from {source} · {}/{} ",
+                filtered.len(),
+                tickets.len()
+            );
+            cursor = Some((2 + filter.chars().count() as u16, 0));
+            let rows = filtered.iter().enumerate().map(|(i, t)| {
+                let style = if i == *selected { sel } else { Style::new() };
+                Line::styled(format!(" {:<14} {}", t.id, t.title), style)
+            });
+            let (list, _) = list_lines(rows, *selected, max_list.saturating_sub(4).max(2));
+            let mut lines = vec![Line::from(vec![Span::raw("> "), Span::raw(filter.clone())])];
+            lines.extend(list);
+            if let Some(t) = filtered.get(*selected) {
+                lines.push(Line::raw(""));
+                if !t.url.is_empty() {
+                    lines.push(Line::styled(
+                        format!(" {}", t.url),
+                        Style::new().fg(theme.accent),
+                    ));
+                }
+                let desc: String = t.description.lines().take(3).collect::<Vec<_>>().join(" ");
+                if !desc.trim().is_empty() {
+                    lines.push(hint(&format!(" {desc}"), theme));
+                }
+            }
+            lines.push(Line::raw(""));
+            lines.push(hint(
+                "type to filter · ↑/↓ · Enter create task · Esc cancel",
+                theme,
+            ));
+            lines
+        }
+        Popup::Log {
+            lines: log, done, ..
+        } => {
+            let max = max_list + 2;
+            let start = log.len().saturating_sub(max);
+            let mut lines: Vec<Line<'_>> =
+                log[start..].iter().map(|l| Line::raw(l.clone())).collect();
+            lines.push(Line::raw(""));
+            lines.push(if *done {
+                hint("done · press any key", theme)
+            } else {
+                hint("working …", theme)
+            });
+            lines
+        }
+        Popup::Palette(p) => {
+            " commands ".clone_into(&mut title);
+            let prompt = if p.typing { ":" } else { " " };
+            cursor = Some((2 + p.filter.chars().count() as u16, 0));
+            let matches = p.matches();
+            let rows = matches.iter().enumerate().map(|(i, c)| {
+                let style = if i == p.selected { sel } else { Style::new() };
+                Line::from(vec![
+                    Span::styled(
+                        format!(" {} ", c.key),
+                        Style::new()
+                            .fg(theme.header)
+                            .add_modifier(Modifier::BOLD)
+                            .patch(style),
+                    ),
+                    Span::styled(format!(" {}", c.label), style),
+                ])
+            });
+            let (list, _) = list_lines(rows, p.selected, max_list);
+            let mut lines = vec![Line::from(vec![
+                Span::styled(format!("{prompt} "), Style::new().fg(theme.accent)),
+                Span::raw(p.filter.clone()),
+            ])];
+            lines.extend(list);
+            lines.push(Line::raw(""));
+            lines.push(hint(
+                if p.typing {
+                    "type to filter · Enter run · Esc close"
+                } else {
+                    "press a shortcut letter · : to type a command · Enter run · Esc close"
+                },
+                theme,
+            ));
+            lines
+        }
+    };
+
+    let inner_width = width.saturating_sub(4).max(1) as usize;
+    let wrapped: usize = lines
+        .iter()
+        .map(|l| {
+            let w = l.width();
+            if w == 0 {
+                1
+            } else {
+                w.div_ceil(inner_width)
+            }
+        })
+        .sum();
+    let height = (wrapped as u16 + 2).min(area.height);
+    let rect = centered(area, width, height);
+    frame.render_widget(Clear, rect);
+    let block = Block::bordered()
+        .title(Span::styled(title, title_style))
+        .border_style(Style::new().fg(if is_warning {
+            theme.warning
+        } else {
+            theme.border_focus
+        }))
+        .style(Style::new().bg(theme.bg).fg(theme.fg));
+    let inner = block.inner(rect);
+    frame.render_widget(block, rect);
+    let text_area = Rect {
+        x: inner.x + 1,
+        width: inner.width.saturating_sub(2),
+        ..inner
+    };
+    frame.render_widget(Paragraph::new(lines).wrap(Wrap { trim: false }), text_area);
+    if let Some((cx, cy)) = cursor {
+        let x = text_area.x + cx.min(text_area.width.saturating_sub(1));
+        frame.set_cursor_position(Position::new(x, text_area.y + cy));
+    }
+}
