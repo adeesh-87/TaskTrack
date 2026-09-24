@@ -45,14 +45,22 @@ pub struct GerritRef {
     pub url: Option<String>,
     /// Commit subject.
     pub subject: String,
+    /// Review status from the Gerrit status command, e.g. `NEW #1234 CR+2 V+1`.
+    pub status: Option<String>,
 }
 
 impl GerritRef {
-    fn render(&self) -> String {
+    /// Render as the value of a `- gerrit:` line.
+    pub fn render(&self) -> String {
         let mut s = format!("{} {}", self.workspace, self.change_id);
         if let Some(u) = &self.url {
             s.push(' ');
             s.push_str(u);
+        }
+        if let Some(st) = &self.status {
+            s.push_str(" [");
+            s.push_str(&st.replace(['[', ']'], ""));
+            s.push(']');
         }
         if !self.subject.is_empty() {
             s.push_str(" :: ");
@@ -66,6 +74,13 @@ impl GerritRef {
             Some((h, s)) => (h, s.trim().to_owned()),
             None => (value, String::new()),
         };
+        let (head, status) = match (head.find(" ["), head.rfind(']')) {
+            (Some(b), Some(e)) if e > b => (
+                format!("{}{}", &head[..b], &head[e + 1..]),
+                Some(head[b + 2..e].trim().to_owned()).filter(|s| !s.is_empty()),
+            ),
+            _ => (head.to_owned(), None),
+        };
         let mut parts = head.split_whitespace();
         let workspace = parts.next()?.to_owned();
         let change_id = parts.next()?.to_owned();
@@ -75,6 +90,7 @@ impl GerritRef {
             change_id,
             url,
             subject,
+            status,
         })
     }
 }
@@ -336,6 +352,46 @@ pub fn write_generated_context(path: &Path, id: &str, body: &str) -> io::Result<
     fs::write(path, out)
 }
 
+/// Record `started` / `finished` for a move from column `from` to `to` of
+/// `columns`. The TUI and `pahiri task move` both use this.
+pub fn record_move(
+    path: &Path,
+    id: &str,
+    from: usize,
+    to: usize,
+    columns: usize,
+    now: &str,
+) -> io::Result<TaskMeta> {
+    let last = columns.saturating_sub(1);
+    update_meta(path, id, |m| {
+        if to > 0 && m.started.is_none() {
+            m.started = Some(now.to_owned());
+        }
+        if columns > 1 && to == last {
+            m.finished = Some(now.to_owned());
+        } else if from == last {
+            m.finished = None;
+        }
+    })
+}
+
+/// Replace the `## Description` section with a ticket's current description.
+pub fn refresh_description(path: &Path, id: &str, description: &str) -> io::Result<()> {
+    let text = read_or_new(path, id)?;
+    let out = super::sections::replace_plain(
+        &text,
+        "## Description",
+        description.trim(),
+        &[
+            "## Context",
+            "## Notes",
+            super::checkpoints::HEADING,
+            "## Attachments",
+        ],
+    );
+    fs::write(path, out)
+}
+
 /// Flip the "context is good enough to plan" switch. The settings page, the
 /// palette and `pahiri task ready` all go through this one function.
 pub fn set_context_ready(path: &Path, id: &str, ready: bool) -> io::Result<TaskMeta> {
@@ -389,7 +445,7 @@ mod tests {
 
     #[test]
     fn parse_and_render_block() {
-        let md = "# T\n\n## Attachments\n<!-- pahiri:begin -->\n- source: jira\n- link: http://x\n- workspace: a\n- workspace: b\n- build: y\n- branch: T\n- gerrit: a I123 https://g/q/I123 :: Fix it\n- created: 2026-01-01T00:00:00Z\n- time_spent: 42m\n- context_ready: true\n<!-- pahiri:end -->\n";
+        let md = "# T\n\n## Attachments\n<!-- pahiri:begin -->\n- source: jira\n- link: http://x\n- workspace: a\n- workspace: b\n- build: y\n- branch: T\n- gerrit: a I123 https://g/q/I123 [NEW #7 CR+2] :: Fix it\n- created: 2026-01-01T00:00:00Z\n- time_spent: 42m\n- context_ready: true\n<!-- pahiri:end -->\n";
         let meta = TaskMeta::parse(md);
         assert_eq!(meta.source.as_deref(), Some("jira"));
         assert_eq!(meta.workspaces, vec!["a", "b"]);
@@ -399,6 +455,7 @@ mod tests {
         assert_eq!(meta.gerrit[0].change_id, "I123");
         assert_eq!(meta.gerrit[0].url.as_deref(), Some("https://g/q/I123"));
         assert_eq!(meta.gerrit[0].subject, "Fix it");
+        assert_eq!(meta.gerrit[0].status.as_deref(), Some("NEW #7 CR+2"));
         assert_eq!(meta.time_spent_min, 42);
         assert!(meta.context_ready);
         assert_eq!(TaskMeta::parse(&meta.apply("")), meta);
@@ -479,15 +536,29 @@ mod tests {
         append_log(&p, "x", "2026-01-02T03:05:00Z", "second").unwrap();
         let text = fs::read_to_string(&p).unwrap();
         assert!(
-            text.contains(
-                "## Log\n- 2026-01-02 03:04 first\n- 2026-01-02 03:05 second\n\n## Attachments\n"
-            ),
+            text.contains(&format!(
+                "## Log\n- {} first\n- {} second\n\n## Attachments\n",
+                crate::time::short("2026-01-02T03:04:05Z"),
+                crate::time::short("2026-01-02T03:05:00Z")
+            )),
             "{text}"
         );
         write_generated_context(&p, "x", "### Goal\n- do it").unwrap();
         let text = fs::read_to_string(&p).unwrap();
         assert!(text.contains("## Context\n<!-- pahiri:context -->\n### Goal\n- do it\n<!-- /pahiri:context -->\n\n## Log"), "{text}");
         assert!(set_context_ready(&p, "x", true).unwrap().context_ready);
+        let m = record_move(&p, "x", 0, 2, 3, "2026-01-03T00:00:00Z").unwrap();
+        assert_eq!(m.started.as_deref(), Some("2026-01-03T00:00:00Z"));
+        assert_eq!(m.finished.as_deref(), Some("2026-01-03T00:00:00Z"));
+        let m = record_move(&p, "x", 2, 1, 3, "2026-01-04T00:00:00Z").unwrap();
+        assert!(m.finished.is_none());
+        assert_eq!(m.started.as_deref(), Some("2026-01-03T00:00:00Z"));
+        refresh_description(&p, "x", "new text").unwrap();
+        let text = fs::read_to_string(&p).unwrap();
+        assert!(
+            text.contains("## Description\n\nnew text\n\n## Context"),
+            "{text}"
+        );
         assert!(read_meta(&p).unwrap().context_ready);
         assert_eq!(read_meta(&p).unwrap().branch.as_deref(), Some("b"));
     }

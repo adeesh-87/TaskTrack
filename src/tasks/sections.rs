@@ -119,6 +119,46 @@ pub fn append_item(markdown: &str, heading: &str, item: &str, before: &[&str]) -
     out
 }
 
+/// Replace the body of a plain `heading` section (up to the next `#`/`##`
+/// heading or pahiri marker), or insert it before the first of `before`.
+pub fn replace_plain(markdown: &str, heading: &str, body: &str, before: &[&str]) -> String {
+    let block_body = format!("\n{}\n\n", body.trim_end());
+    if let Some(start) = first_heading(markdown, &[heading]) {
+        let body_start = start
+            + markdown[start..]
+                .find('\n')
+                .map_or(markdown.len() - start, |i| i + 1);
+        let mut end = markdown.len();
+        let mut offset = body_start;
+        for line in markdown[body_start..].split_inclusive('\n') {
+            let t = line.trim_start();
+            if t.starts_with("## ") || t.starts_with("# ") || t.starts_with("<!-- pahiri:") {
+                end = offset;
+                break;
+            }
+            offset += line.len();
+        }
+        return format!(
+            "{}{block_body}{}",
+            &markdown[..body_start],
+            &markdown[end..]
+        );
+    }
+    let block = format!("{heading}\n{block_body}");
+    if let Some(at) = first_heading(markdown, before) {
+        return format!("{}{block}{}", &markdown[..at], &markdown[at..]);
+    }
+    let mut out = markdown.to_owned();
+    if !out.is_empty() && !out.ends_with('\n') {
+        out.push('\n');
+    }
+    if !out.is_empty() && !out.ends_with("\n\n") {
+        out.push('\n');
+    }
+    out.push_str(&block);
+    out
+}
+
 /// Lines of a plain `## heading` section (without the heading), trimmed, non-empty.
 pub fn section_lines<'a>(markdown: &'a str, heading: &str) -> Vec<&'a str> {
     let mut out = Vec::new();
@@ -161,6 +201,19 @@ mod tests {
         assert_eq!(extract(&again, B, E), Some("\nnew\nlines\n"));
         let plain = upsert("# T", "## X", B, E, "b", &["## Nope"]);
         assert_eq!(plain, "# T\n\n## X\n<!-- x -->\nb\n<!-- /x -->\n");
+    }
+
+    #[test]
+    fn replace_plain_sections() {
+        let md = "# T\n\n## Description\n\nold\nlines\n\n## Notes\n\nmine\n";
+        assert_eq!(
+            replace_plain(md, "## Description", "new", &[]),
+            "# T\n\n## Description\n\nnew\n\n## Notes\n\nmine\n"
+        );
+        assert_eq!(
+            replace_plain("# T\n\n## Notes\n", "## Description", "d", &["## Notes"]),
+            "# T\n\n## Description\n\nd\n\n## Notes\n"
+        );
     }
 
     #[test]

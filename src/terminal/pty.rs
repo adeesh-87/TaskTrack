@@ -44,6 +44,8 @@ pub struct SpawnOptions {
     pub cols: u16,
     /// Scrollback lines to keep.
     pub scrollback: usize,
+    /// Name shown in the shell list (default: the program's file name).
+    pub label: Option<String>,
 }
 
 /// Records the window title set by the child via OSC 0/2.
@@ -69,6 +71,7 @@ pub struct PtySession {
     size: (u16, u16),
     exited: bool,
     label: String,
+    pid: Option<u32>,
 }
 
 impl std::fmt::Debug for PtySession {
@@ -117,6 +120,7 @@ impl PtySession {
         drop(pair.slave);
 
         let killer = child.clone_killer();
+        let pid = child.process_id();
         let mut reader = pair
             .master
             .try_clone_reader()
@@ -142,10 +146,12 @@ impl PtySession {
             })
             .context("spawning pty reader thread")?;
 
-        let label = std::path::Path::new(&opts.program).file_name().map_or_else(
-            || opts.program.clone(),
-            |n| n.to_string_lossy().into_owned(),
-        );
+        let label = opts.label.clone().unwrap_or_else(|| {
+            std::path::Path::new(&opts.program).file_name().map_or_else(
+                || opts.program.clone(),
+                |n| n.to_string_lossy().into_owned(),
+            )
+        });
 
         Ok(Self {
             id,
@@ -161,7 +167,19 @@ impl PtySession {
             size: (rows, cols),
             exited: false,
             label,
+            pid,
         })
+    }
+
+    /// Process id of the child.
+    pub fn pid(&self) -> Option<u32> {
+        self.pid
+    }
+
+    /// Current working directory of the child (Linux: `/proc/<pid>/cwd`).
+    pub fn cwd(&self) -> Option<PathBuf> {
+        let pid = self.pid?;
+        std::fs::read_link(format!("/proc/{pid}/cwd")).ok()
     }
 
     /// Identifier.
@@ -275,6 +293,7 @@ mod tests {
             rows: 5,
             cols: 40,
             scrollback: 100,
+            label: None,
         }
     }
 

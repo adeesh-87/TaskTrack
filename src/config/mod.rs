@@ -2,6 +2,7 @@
 
 pub mod keybind;
 
+use std::collections::BTreeMap;
 use std::fmt;
 use std::fs;
 use std::path::{Path, PathBuf};
@@ -102,6 +103,9 @@ pub struct ShellConfig {
     pub program: String,
     /// Extra arguments, e.g. `["-l"]`.
     pub args: Vec<String>,
+    /// Run each shell inside its own tmux session (socket `pahiri`), so shells
+    /// and the programs in them keep running when pahiri exits.
+    pub tmux: bool,
 }
 
 impl Default for ShellConfig {
@@ -109,6 +113,7 @@ impl Default for ShellConfig {
         Self {
             program: "zsh".to_owned(),
             args: vec!["-i".to_owned()],
+            tmux: false,
         }
     }
 }
@@ -170,7 +175,7 @@ impl Default for AgentConfig {
     fn default() -> Self {
         Self {
             command: "claude".into(),
-            args: vec!["-p".into(), "{prompt}".into()],
+            args: vec!["-p".into()],
             context_prompt: PathBuf::new(),
             checkpoint_prompt: PathBuf::new(),
             timeout_secs: 600,
@@ -214,6 +219,8 @@ pub struct TimerConfig {
     pub flash: bool,
     /// Ring the terminal bell when time is up.
     pub bell: bool,
+    /// Pause the timer after this many minutes without a key press or click (0: never).
+    pub idle_minutes: u64,
 }
 
 impl Default for TimerConfig {
@@ -222,6 +229,7 @@ impl Default for TimerConfig {
             focus_minutes: 25,
             flash: true,
             bell: true,
+            idle_minutes: 15,
         }
     }
 }
@@ -271,6 +279,20 @@ pub struct Config {
     pub task_sources: Vec<TaskSource>,
     /// Gerrit web URL; empty derives it from each workspace's `origin` remote.
     pub gerrit_url: String,
+    /// Command that reports Gerrit change status (see the help page, Gerrit tab).
+    pub gerrit_status_command: String,
+    /// Shell commands run on events, `event = command` (see the help page, Hooks tab).
+    pub hooks: BTreeMap<String, String>,
+    /// Give up on a hook after this many seconds.
+    pub hook_timeout_secs: u64,
+    /// Hide tasks finished more than this many days ago (0: never).
+    pub archive_after_days: u64,
+    /// Soft-wrap long lines of Markdown and plain text in the editor.
+    pub soft_wrap: bool,
+    /// Reopen each task's shells (in the same folders) after a restart.
+    pub restore_shells: bool,
+    /// Key overrides: `palette.<action> = "x"` or `leader.<command> = "x"`.
+    pub keys: BTreeMap<String, String>,
     /// One-shot agent for context and checkpoints.
     pub agent: AgentConfig,
     /// Interactive coding agent.
@@ -301,6 +323,13 @@ impl Default for Config {
             builds: Vec::new(),
             task_sources: Vec::new(),
             gerrit_url: String::new(),
+            gerrit_status_command: String::new(),
+            hooks: BTreeMap::new(),
+            hook_timeout_secs: 15,
+            archive_after_days: 14,
+            soft_wrap: true,
+            restore_shells: true,
+            keys: BTreeMap::new(),
             agent: AgentConfig::default(),
             coding_agent: CodingAgentConfig::default(),
             timer: TimerConfig::default(),
@@ -448,6 +477,18 @@ impl Config {
         if self.timer.focus_minutes == 0 {
             errors.push("focus block must be at least 1 minute".into());
         }
+        for (event, command) in &self.hooks {
+            if crate::hooks::HookEvent::from_name(event).is_none() {
+                errors.push(format!("unknown hook event {event:?} (see help → Hooks)"));
+            }
+            if command.trim().is_empty() {
+                errors.push(format!("hook {event} has no command"));
+            }
+        }
+        if self.hook_timeout_secs == 0 {
+            errors.push("hook timeout must be at least 1 second".into());
+        }
+        errors.extend(crate::app::keymap::validate_overrides(&self.keys));
         errors
     }
 
@@ -606,6 +647,33 @@ mod tests {
     }
 
     #[test]
+    fn hooks_and_keys_are_validated() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut cfg = Config {
+            tasks_dir: dir.path().to_path_buf(),
+            ..Config::default()
+        };
+        cfg.hooks.insert("task_enter".into(), "echo hi".into());
+        cfg.keys.insert("palette.timer".into(), "u".into());
+        cfg.keys.insert("leader.coding_agent".into(), "A".into());
+        assert!(cfg.validate().is_empty(), "{:?}", cfg.validate());
+        cfg.hooks.insert("nope".into(), " ".into());
+        cfg.keys.insert("palette.bogus".into(), "y".into());
+        cfg.keys.insert("leader.timer".into(), "long".into());
+        let errors = cfg.validate();
+        assert!(
+            errors.iter().any(|e| e.contains("unknown hook event")),
+            "{errors:?}"
+        );
+        assert!(errors.iter().any(|e| e.contains("no command")));
+        assert!(errors.iter().any(|e| e.contains("bogus")));
+        assert!(errors.iter().any(|e| e.contains("one character")));
+        let path = dir.path().join("c.toml");
+        cfg.save(&path).unwrap();
+        assert_eq!(Config::load(&path).unwrap().unwrap(), cfg);
+    }
+
+    #[test]
     fn partial_file_uses_defaults() {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("config.toml");
@@ -613,7 +681,7 @@ mod tests {
         let cfg = Config::load(&path).unwrap().unwrap();
         assert_eq!(cfg.categories, Config::default().categories);
         assert_eq!(cfg.shell.program, "zsh");
-        assert_eq!(cfg.agent.args, vec!["-p", "{prompt}"]);
+        assert_eq!(cfg.agent.args, vec!["-p"]);
         assert_eq!(cfg.timer.focus_minutes, 25);
         assert_eq!(
             cfg.prompt_path(crate::ai::PromptKind::Context, &path),

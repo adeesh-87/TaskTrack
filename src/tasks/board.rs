@@ -147,6 +147,21 @@ impl Board {
         true
     }
 
+    /// Move `task` up (`delta < 0`) or down within its column. Returns whether it moved.
+    pub fn shift(&mut self, task: &str, delta: i32) -> bool {
+        let Some((ci, ti)) = self.locate(task) else {
+            return false;
+        };
+        let len = self.columns[ci].tasks.len() as i64;
+        let target = ti as i64 + i64::from(delta);
+        if target < 0 || target >= len || target == ti as i64 {
+            return false;
+        }
+        let t = self.columns[ci].tasks.remove(ti);
+        self.columns[ci].tasks.insert(target as usize, t);
+        true
+    }
+
     /// Add a new task to column `to` (defaults to the first column when out of range).
     pub fn add(&mut self, task: &str, to: usize) {
         if self.contains(task) || self.columns.is_empty() {
@@ -253,6 +268,17 @@ mod tests {
         assert_eq!(b.locate("t"), Some((2, 0)));
         assert!(!b.move_to("t", 9));
         assert!(!b.move_to("nope", 0));
+    }
+
+    #[test]
+    fn shift_within_column() {
+        let mut b = Board::parse("## Planned\n- a\n- b\n- c\n", &CATS);
+        assert!(b.shift("c", -1));
+        assert_eq!(b.columns[0].tasks, vec!["a", "c", "b"]);
+        assert!(!b.shift("a", -1));
+        assert!(b.shift("a", 2));
+        assert_eq!(b.columns[0].tasks, vec!["c", "b", "a"]);
+        assert!(!b.shift("zz", 1));
     }
 
     #[test]

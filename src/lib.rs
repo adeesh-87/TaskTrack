@@ -10,6 +10,7 @@
 //! * [`editor`] — a minimal text buffer for viewing/editing one file.
 //! * [`terminal`] — PTY sessions, key encoding, and VT screen rendering.
 //! * [`ai`] — prompt templates and one-shot agent calls.
+//! * [`hooks`] — user scripts run on events.
 //! * [`app`] — the state machine that ties everything together.
 //! * [`ui`] — pure drawing code (ratatui) over the app state.
 //! * [`cli`] — `pahiri task …`, `pahiri report`, `pahiri install-skills`.
@@ -22,6 +23,7 @@ pub mod editor;
 pub mod files;
 pub mod git;
 pub mod highlight;
+pub mod hooks;
 pub mod tasks;
 pub mod terminal;
 pub mod time;

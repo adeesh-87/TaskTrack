@@ -67,6 +67,103 @@ pub enum Action {
     CodingAgent,
     /// Open a prompt template in the editor.
     EditPrompts,
+    /// Record a one-line outcome for the task.
+    RecordOutcome,
+    /// Push the task branches for review (Gerrit refs/for).
+    PushReview,
+    /// Rebase the task branches onto their main branch.
+    Rebase,
+    /// Find text in the editor.
+    Find,
+}
+
+impl Action {
+    /// Every action (for key overrides and help).
+    pub const ALL: [Action; 36] = [
+        Self::TaskList,
+        Self::Config,
+        Self::Quit,
+        Self::NewTask,
+        Self::Refresh,
+        Self::Attach,
+        Self::Prepare,
+        Self::NewShell,
+        Self::CloseShell,
+        Self::OpenContext,
+        Self::FocusFiles,
+        Self::FocusEditor,
+        Self::FocusShells,
+        Self::FocusTerminal,
+        Self::Zoom,
+        Self::MoveNext,
+        Self::MovePrev,
+        Self::ToggleHidden,
+        Self::Save,
+        Self::CloseEditor,
+        Self::Help,
+        Self::DeleteTask,
+        Self::Timer,
+        Self::StopTimer,
+        Self::CheckpointDone,
+        Self::Checkpoints,
+        Self::Gerrit,
+        Self::GenerateContext,
+        Self::ToggleContextReady,
+        Self::BreakDown,
+        Self::CodingAgent,
+        Self::EditPrompts,
+        Self::RecordOutcome,
+        Self::PushReview,
+        Self::Rebase,
+        Self::Find,
+    ];
+
+    /// Name used for key overrides (`palette.<name>`).
+    pub fn name(self) -> &'static str {
+        match self {
+            Self::TaskList => "task_list",
+            Self::Config => "config",
+            Self::Quit => "quit",
+            Self::NewTask => "new_task",
+            Self::Refresh => "refresh",
+            Self::Attach => "attach",
+            Self::Prepare => "prepare",
+            Self::NewShell => "new_shell",
+            Self::CloseShell => "close_shell",
+            Self::OpenContext => "open_context",
+            Self::FocusFiles => "focus_files",
+            Self::FocusEditor => "focus_editor",
+            Self::FocusShells => "focus_shells",
+            Self::FocusTerminal => "focus_terminal",
+            Self::Zoom => "zoom",
+            Self::MoveNext => "move_next",
+            Self::MovePrev => "move_prev",
+            Self::ToggleHidden => "toggle_hidden",
+            Self::Save => "save",
+            Self::CloseEditor => "close_editor",
+            Self::Help => "help",
+            Self::DeleteTask => "delete_task",
+            Self::Timer => "timer",
+            Self::StopTimer => "stop_timer",
+            Self::CheckpointDone => "checkpoint_done",
+            Self::Checkpoints => "checkpoints",
+            Self::Gerrit => "gerrit",
+            Self::GenerateContext => "generate_context",
+            Self::ToggleContextReady => "context_ready",
+            Self::BreakDown => "break_down",
+            Self::CodingAgent => "coding_agent",
+            Self::EditPrompts => "edit_prompts",
+            Self::RecordOutcome => "outcome",
+            Self::PushReview => "push_review",
+            Self::Rebase => "rebase",
+            Self::Find => "find",
+        }
+    }
+
+    /// Look up by name.
+    pub fn from_name(name: &str) -> Option<Self> {
+        Self::ALL.into_iter().find(|a| a.name() == name)
+    }
 }
 
 /// A palette entry.
@@ -94,7 +191,7 @@ pub fn list_commands() -> Vec<Command> {
         ),
         cmd(
             'm',
-            "timer: start / pause / resume (selected task)",
+            "timer menu (start / pause / next / stop)",
             Action::Timer,
         ),
         cmd('M', "timer: stop and book the time", Action::StopTimer),
@@ -102,10 +199,11 @@ pub fn list_commands() -> Vec<Command> {
         cmd('k', "checkpoints of the selected task", Action::Checkpoints),
         cmd(']', "move task to next category", Action::MoveNext),
         cmd('[', "move task to previous category", Action::MovePrev),
+        cmd('O', "record a one-line outcome", Action::RecordOutcome),
         cmd('D', "delete task (moves it to .trash)", Action::DeleteTask),
         cmd('r', "rescan tasks folder", Action::Refresh),
         cmd('c', "configuration", Action::Config),
-        cmd('h', "help / keys", Action::Help),
+        cmd('h', "help page (F1)", Action::Help),
         cmd('q', "quit pahiri", Action::Quit),
     ]
 }
@@ -124,7 +222,11 @@ pub fn task_commands() -> Vec<Command> {
             "attach code workspaces / vendor builds",
             Action::Attach,
         ),
-        cmd('m', "timer: start / pause / resume", Action::Timer),
+        cmd(
+            'm',
+            "timer menu (start / pause / next / stop)",
+            Action::Timer,
+        ),
         cmd('M', "timer: stop and book the time", Action::StopTimer),
         cmd('v', "checkpoint done → next", Action::CheckpointDone),
         cmd('k', "checkpoints", Action::Checkpoints),
@@ -142,10 +244,22 @@ pub fn task_commands() -> Vec<Command> {
         ),
         cmd(
             'g',
-            "find Gerrit changes on the task branches",
+            "Gerrit: find changes on the task branches (+ status)",
             Action::Gerrit,
         ),
+        cmd(
+            'P',
+            "Gerrit: push the task branches for review",
+            Action::PushReview,
+        ),
+        cmd('R', "rebase the task branches onto main", Action::Rebase),
+        cmd('O', "record a one-line outcome", Action::RecordOutcome),
         cmd('E', "edit AI prompt templates", Action::EditPrompts),
+        cmd(
+            'F',
+            "find in the editor (then F3 / Ctrl+G for next)",
+            Action::Find,
+        ),
         cmd('s', "new shell", Action::NewShell),
         cmd('x', "close selected shell", Action::CloseShell),
         cmd('o', "open CONTEXT.md", Action::OpenContext),
@@ -162,7 +276,7 @@ pub fn task_commands() -> Vec<Command> {
         cmd('n', "new task", Action::NewTask),
         cmd('D', "delete task (moves it to .trash)", Action::DeleteTask),
         cmd('c', "configuration", Action::Config),
-        cmd('h', "help / keys", Action::Help),
+        cmd('h', "help page (F1)", Action::Help),
         cmd('q', "quit pahiri", Action::Quit),
     ]
 }
@@ -255,6 +369,13 @@ mod tests {
             keys.sort_unstable();
             keys.dedup();
             assert_eq!(keys.len(), cmds.len());
+        }
+    }
+
+    #[test]
+    fn names_roundtrip() {
+        for a in Action::ALL {
+            assert_eq!(Action::from_name(a.name()), Some(a));
         }
     }
 

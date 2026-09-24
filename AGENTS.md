@@ -8,7 +8,8 @@ Read, in this order, only what the change needs:
 
 1. `docs/ARCHITECTURE.md` — module map, event loop, where state lives.
 2. `docs/HOWTO.md` — recipes for the usual changes (key, palette command,
-   setting, popup, CONTEXT.md field, background job, CLI command).
+   setting, popup, CONTEXT.md field, hook event, help text, background job,
+   CLI command).
 3. `docs/FORMATS.md` — files on disk and what agents/scripts must print.
 
 ## Commands (all must pass before you finish)
@@ -33,5 +34,7 @@ python3 scripts/smoke.py   # optional: drives the real binary (pip install pexpe
   instead of `s.push_str(&format!(…))`, inline `{var}` in `format!`, end
   statements with `;`, backticks around code in doc comments.
 - MSRV is 1.80: no `is_none_or`, no `iter::repeat_n`.
-- User-facing change → update `README.md` (and the help text in
-  `src/app/keymap.rs` if keys change).
+- Prefer a hook over new built-in behaviour when the user could want it
+  differently (e.g. moving a task when its timer starts is a hook example).
+- User-facing change → update `README.md` and the help page
+  (`src/app/help.rs`).

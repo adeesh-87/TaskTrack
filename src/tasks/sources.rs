@@ -86,6 +86,70 @@ fn non_empty_ids(tickets: Vec<Ticket>) -> Result<Vec<Ticket>, String> {
     Ok(tickets)
 }
 
+/// Review status of one Gerrit change, as printed by the Gerrit status command.
+#[derive(Debug, Clone, PartialEq, Eq, Default, Deserialize)]
+pub struct GerritStatus {
+    /// `Change-Id` (`I` + 40 hex) — required.
+    #[serde(alias = "id")]
+    pub change_id: String,
+    /// Change number.
+    #[serde(default)]
+    pub number: Option<u64>,
+    /// `NEW`, `MERGED`, `ABANDONED`, …
+    #[serde(default)]
+    pub status: String,
+    /// Link to the change.
+    #[serde(default)]
+    pub url: Option<String>,
+    /// Votes in any short form, e.g. `CR+2 V+1`.
+    #[serde(default)]
+    pub labels: String,
+    /// Subject (replaces the commit subject when given).
+    #[serde(default)]
+    pub subject: Option<String>,
+}
+
+impl GerritStatus {
+    /// `NEW #1234 CR+2 V+1`.
+    pub fn summary(&self) -> String {
+        let mut parts = Vec::new();
+        if !self.status.is_empty() {
+            parts.push(self.status.clone());
+        }
+        if let Some(n) = self.number {
+            parts.push(format!("#{n}"));
+        }
+        if !self.labels.trim().is_empty() {
+            parts.push(self.labels.trim().to_owned());
+        }
+        parts.join(" ")
+    }
+}
+
+/// Parse the Gerrit status command's output: a JSON array or JSON lines.
+pub fn parse_gerrit_status(output: &str) -> Result<Vec<GerritStatus>, String> {
+    let text = output.trim();
+    if text.is_empty() {
+        return Ok(Vec::new());
+    }
+    let list: Vec<GerritStatus> = if text.starts_with('[') {
+        serde_json::from_str(text).map_err(|e| format!("invalid JSON array: {e}"))?
+    } else {
+        text.lines()
+            .map(str::trim)
+            .filter(|l| !l.is_empty())
+            .enumerate()
+            .map(|(n, l)| {
+                serde_json::from_str(l).map_err(|e| format!("invalid JSON on line {}: {e}", n + 1))
+            })
+            .collect::<Result<_, _>>()?
+    };
+    if let Some(bad) = list.iter().find(|s| s.change_id.trim().is_empty()) {
+        return Err(format!("entry without change_id: {bad:?}"));
+    }
+    Ok(list)
+}
+
 /// Run a task source command through `sh -c` and parse its output.
 pub fn fetch(command: &str, task_dir: Option<&std::path::Path>) -> Result<Vec<Ticket>, String> {
     let mut cmd = Command::new("sh");
@@ -163,6 +227,18 @@ mod tests {
             .task_id(),
             "ORB-7"
         );
+    }
+
+    #[test]
+    fn gerrit_status_output() {
+        let out = r#"{"change_id":"I1","number":12,"status":"NEW","labels":"CR+2 V+1","url":"https://g/c/p/+/12"}
+{"id":"I2","status":"MERGED"}"#;
+        let s = parse_gerrit_status(out).unwrap();
+        assert_eq!(s[0].summary(), "NEW #12 CR+2 V+1");
+        assert_eq!(s[1].summary(), "MERGED");
+        assert_eq!(parse_gerrit_status("[]").unwrap().len(), 0);
+        assert!(parse_gerrit_status("{\"status\":\"NEW\"}").is_err());
+        assert!(parse_gerrit_status("nope").is_err());
     }
 
     #[test]

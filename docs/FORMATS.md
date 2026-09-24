@@ -49,6 +49,17 @@ Checkpoint line grammar (tolerant): `- [ ]` or `- [x]`, optional `1.`,
 title, then `(<estimate>[; spent <duration>])` at the end of the line.
 Durations: `40m`, `1h`, `1h30m`, `1.5h`, `90 min`, `2 hours`, `45`.
 
+## `timelog.tsv` (time ledger, in the tasks folder)
+
+One line per booking: `2026-09-24T10:05:00Z<TAB>PROJ-42<TAB>7<TAB>Read the spec`
+(UTC time, task, minutes, checkpoint or `focus block`). Append-only.
+
+## `session.json` (state folder)
+
+The timer (`task_id`, `checkpoint`, `budget_secs`, `elapsed_secs`,
+`flushed_secs`, `running`, `saved_at`) and each task's shells (`cwd`,
+`tmux` session name). Written on quit and every minute while timing.
+
 ## `status.md` (board)
 
 `## <Category>` headings in configured order, `- <task-id>` items. Unknown
@@ -60,6 +71,24 @@ Run through `sh -c`; print one of: JSON array, JSON lines, or TSV
 `id<TAB>title<TAB>url<TAB>description` (`\n` escapes in the description).
 Only `id` is required. Aliases: `key`, `summary`, `link`, `body`.
 Non-zero exit = error (stderr tail is shown). Examples in `examples/`.
+
+## Gerrit status command
+
+Gets the Change-Ids as arguments (inline code using `$@` gets them as
+positional parameters) and in `$PAHIRI_GERRIT_CHANGES`. Prints JSON lines
+or an array: `{"change_id", "number", "status", "url", "labels", "subject"}`,
+only `change_id` required. Stored as `[STATUS #number labels]` on the
+`- gerrit:` line.
+
+## Hooks
+
+`[hooks]` `event = "command"`, run through `sh -c` in the task folder with
+`PAHIRI_HOOK`, `PAHIRI_BIN`, `PAHIRI_CONFIG`, `PAHIRI_TASKS_DIR`,
+`PAHIRI_TASK`, `PAHIRI_TASK_DIR`, `PAHIRI_CONTEXT_FILE`, `PAHIRI_TASK_TITLE`,
+`PAHIRI_COLUMN(_INDEX)`, `PAHIRI_LINK`, `PAHIRI_BRANCH`,
+`PAHIRI_CODE_DIR(S)`, `PAHIRI_BUILD_DIR(S)`, `PAHIRI_NEXT_CHECKPOINT`,
+`PAHIRI_CONTEXT_READY`, plus per-event variables (`src/hooks.rs`
+`extra_env`, or the help page). stdout's last line becomes the status line.
 
 ## One-shot agent (Esc i / Esc b)
 
@@ -83,6 +112,9 @@ Prompt = user template (placeholders `{{task}} {{task_dir}} {{context_file}}
 pahiri task ready [--task ID] [--off]   flip context_ready
 pahiri task log [--task ID] <message…>  append to ## Log
 pahiri task next [--task ID]            current checkpoint and the one after
+pahiri task move [--task ID] --to COL   move on the board, record dates
+pahiri task outcome [--task ID] <text…> append to ## Outcome
+pahiri trash empty [--older-than 30d]   delete old trashed tasks
 pahiri report [--from D] [--to D] [--json]   tasks active in the range
 pahiri install-skills <DIR> [--force]   write bundled skills to DIR/<name>/SKILL.md
 ```

@@ -9,22 +9,20 @@ use std::time::Duration;
 
 use crate::ai::{self, AgentCall, PromptKind, PROMPT_ARG};
 use crate::config::Config;
-use crate::git;
 use crate::tasks::checkpoints::{self, fmt_minutes};
 use crate::tasks::context::{self as ctxfile};
-use crate::tasks::GerritRef;
 use crate::time::now_rfc3339;
 
 use super::{App, AppEvent, Choice, JobEvent, Pending, Popup, TaskContext};
 
 impl App {
-    fn log_line(&mut self, line: impl Into<String>) {
+    pub(super) fn log_line(&mut self, line: impl Into<String>) {
         if let Some(Popup::Log { lines, .. }) = &mut self.popup {
             lines.push(line.into());
         }
     }
 
-    fn finish_log(&mut self) {
+    pub(super) fn finish_log(&mut self) {
         if let Some(Popup::Log { done, .. }) = &mut self.popup {
             *done = true;
         }
@@ -76,6 +74,13 @@ impl App {
             ),
             ("next_checkpoint", next),
             ("max_words", self.max_words().to_string()),
+            (
+                "estimate_factor",
+                self.today.estimate_factor.map_or_else(
+                    || "1.0 (not enough history yet)".to_owned(),
+                    |(f, _)| format!("{f:.2}"),
+                ),
+            ),
         ]
     }
 
@@ -422,113 +427,6 @@ impl App {
         self.set_status(format!(
             "coding agent starting in shell #{number} · leader q leaves · leader z zooms"
         ));
-    }
-
-    // ----- gerrit ---------------------------------------------------------------------------
-
-    /// `g`: find commits with a `Change-Id` on the task branch of every attached workspace.
-    pub(super) fn find_gerrit(&mut self) {
-        let Some(ctx) = self.active_context() else {
-            self.set_status("open a task first");
-            return;
-        };
-        if ctx.meta.workspaces.is_empty() {
-            self.error("no code workspace attached to this task yet (Esc a to attach)".into());
-            return;
-        }
-        let task_id = ctx.id.clone();
-        let branch = ctx.meta.branch.clone().unwrap_or_else(|| ctx.id.clone());
-        let jobs: Vec<(String, PathBuf, String)> = ctx
-            .meta
-            .workspaces
-            .iter()
-            .filter_map(|n| self.config.workspace(n))
-            .map(|w| {
-                (
-                    w.name.clone(),
-                    w.path.clone(),
-                    self.config.main_branch_for(w),
-                )
-            })
-            .collect();
-        let override_url = self
-            .config
-            .gerrit_url
-            .trim()
-            .trim_end_matches('/')
-            .to_owned();
-        self.popup = Some(Popup::log(format!("Gerrit changes · {task_id}")));
-        let events = self.events.clone();
-        let spawned = std::thread::Builder::new()
-            .name("gerrit".into())
-            .spawn(move || {
-                let log = |l: String| events.send(AppEvent::Job(JobEvent::Log(l)));
-                let mut found = Vec::new();
-                let mut scanned = false;
-                for (name, path, main) in &jobs {
-                    if !git::branch_exists(path, &branch) {
-                        log(format!(
-                            "[{name}] no branch '{branch}' yet (Esc p prepares it)"
-                        ));
-                        continue;
-                    }
-                    match git::gerrit_commits(path, main, &branch) {
-                        Ok(commits) => {
-                            scanned = true;
-                            let base = if override_url.is_empty() {
-                                git::gerrit_base_url(path)
-                            } else {
-                                Some(override_url.clone())
-                            };
-                            log(format!(
-                                "[{name}] {main}..{branch}: {} change(s)",
-                                commits.len()
-                            ));
-                            for c in commits {
-                                let url = base.as_ref().map(|b| format!("{b}/q/{}", c.change_id));
-                                log(format!(
-                                    "  {} {}  {}",
-                                    &c.sha[..c.sha.len().min(8)],
-                                    c.subject,
-                                    url.as_deref().unwrap_or(&c.change_id)
-                                ));
-                                found.push(GerritRef {
-                                    workspace: name.clone(),
-                                    change_id: c.change_id,
-                                    url,
-                                    subject: c.subject,
-                                });
-                            }
-                        }
-                        Err(e) => log(format!("[{name}] skipped: {e}")),
-                    }
-                }
-                events.send(AppEvent::Job(JobEvent::Gerrit {
-                    task_id,
-                    found,
-                    scanned,
-                }));
-            });
-        if let Err(e) = spawned {
-            self.error(format!("could not start: {e}"));
-        }
-    }
-
-    pub(super) fn handle_gerrit(&mut self, task_id: &str, found: Vec<GerritRef>, scanned: bool) {
-        self.log_line("");
-        if scanned {
-            let n = found.len();
-            let path = self.context_path(task_id);
-            let result = path.map(|p| ctxfile::update_meta(&p, task_id, |m| m.gerrit = found));
-            match result {
-                Some(Err(e)) => self.log_line(format!("FAILED to update CONTEXT.md: {e}")),
-                _ => self.log_line(format!("done: {n} change(s) recorded in CONTEXT.md")),
-            }
-            self.after_task_file_change(task_id);
-        } else {
-            self.log_line("done: nothing scanned, CONTEXT.md unchanged");
-        }
-        self.finish_log();
     }
 }
 

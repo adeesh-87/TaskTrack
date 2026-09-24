@@ -77,6 +77,7 @@ impl Harness {
                 shell: ShellConfig {
                     program: "bash".into(),
                     args: vec!["--norc".into(), "-i".into()],
+                    tmux: false,
                 },
                 ..Config::default()
             };
@@ -745,56 +746,104 @@ fn delete_task_moves_it_to_trash() {
     assert!(!h.tasks.join("beta").exists());
 }
 
+impl Harness {
+    /// Let the next tick look for outside changes (normally every ~1 s).
+    fn watch(&mut self) {
+        self.app.watched = Instant::now().checked_sub(Duration::from_secs(5)).unwrap();
+        self.app.handle(AppEvent::Tick);
+    }
+
+    /// Quit and start a new app with the same config and state folder.
+    fn restart(&mut self) {
+        self.app.shutdown();
+        let (tx, rx) = EventSender::channel();
+        let cfg = self.app.config().clone();
+        self.app = App::new(
+            Some(cfg),
+            self.root.join("config.toml"),
+            self.root.join("state"),
+            tx,
+        );
+        self.rx = rx;
+    }
+
+    fn choice_index(&self, prefix: &str) -> Option<char> {
+        match self.app.popup() {
+            Some(Popup::Choose { choices, .. }) => choices
+                .iter()
+                .position(|c| c.label.starts_with(prefix))
+                .map(|i| char::from(b'1' + i as u8)),
+            _ => None,
+        }
+    }
+
+    fn choose(&mut self, prefix: &str) {
+        let c = self
+            .choice_index(prefix)
+            .unwrap_or_else(|| panic!("no choice {prefix:?} in {:?}", self.app.popup()));
+        self.press(key(KeyCode::Char(c)));
+    }
+}
+
 #[test]
-fn timer_runs_checkpoints_books_time_and_alarms() {
-    let mut h = Harness::build(true, |cfg| {
-        cfg.categories = vec!["Planned".into(), "Doing".into(), "Done".into()];
-    });
+fn timer_menu_alarm_without_popup_and_bookkeeping() {
+    let mut h = Harness::new(true);
     fs::write(h.tasks.join("alpha/CONTEXT.md"), PLAN).unwrap();
     h.app.refresh_next_up();
     assert_eq!(h.app.next_up().len(), 2);
-    // Start on the first open checkpoint from the list; the task moves to Doing.
+    // m opens the timer menu; starting leaves the task in its column.
     h.press(key(KeyCode::Char('m')));
+    assert!(
+        popup_title(&h.app).starts_with("Timer · alpha"),
+        "{:?}",
+        h.app.popup()
+    );
+    h.choose("start: Read the spec");
     let t = h.app.timer().expect("timer");
     assert_eq!(t.checkpoint.as_deref(), Some("Read the spec"));
+    assert_eq!(t.checkpoint_index, Some(0));
     assert_eq!(t.budget, Duration::from_secs(20 * 60));
     assert_eq!(
         h.app.store().unwrap().board().locate("alpha").map(|l| l.0),
-        Some(1)
+        Some(0)
     );
     assert!(h.context_md("alpha").contains("- started: "));
 
-    // 7 minutes pass, pause books whole minutes to the checkpoint and the task.
+    // 7 minutes pass; pausing books whole minutes to the checkpoint, task and ledger.
     h.app
         .timer
         .as_mut()
         .unwrap()
         .backdate(Duration::from_secs(7 * 60 + 20));
     h.press(key(KeyCode::Char('m')));
+    h.choose("pause");
     assert!(!h.app.timer().unwrap().is_running());
     let md = h.context_md("alpha");
     assert!(md.contains("- [ ] Read the spec (20m; spent 7m)"), "{md}");
     assert!(md.contains("- time_spent: 7m"), "{md}");
+    let ledger = fs::read_to_string(h.tasks.join("timelog.tsv")).unwrap();
+    assert!(ledger.contains("\talpha\t7\tRead the spec"), "{ledger}");
     h.press(key(KeyCode::Char('m')));
+    h.choose("resume");
     assert!(h.app.timer().unwrap().is_running());
 
-    // Time runs out: flash, bell, and the time's-up choice.
+    // Time runs out: flash, bell, blinking chip — and no popup taking the keys.
     h.app
         .timer
         .as_mut()
         .unwrap()
         .backdate(Duration::from_secs(13 * 60));
     h.app.handle(AppEvent::Tick);
-    assert!(
-        popup_title(&h.app).starts_with("Time's up"),
-        "{:?}",
-        h.app.popup()
-    );
+    assert!(h.app.popup().is_none(), "{:?}", h.app.popup());
     assert!(h.app.take_bell());
     assert!(h.app.flash_on());
+    assert!(h.app.timer().unwrap().alarming());
     assert!(h.app.tick_interval() < Duration::from_millis(250));
-    // "done — start next".
-    h.press(key(KeyCode::Char('1')));
+    // Opening the menu (Esc m or a click on the chip) acknowledges it.
+    h.app.ui.timer_chip = Rect::new(100, 40, 20, 1);
+    h.mouse(click(105, 40));
+    assert!(!h.app.timer().unwrap().alarming());
+    h.choose("done → next: Write the code");
     let md = h.context_md("alpha");
     assert!(md.contains("- [x] Read the spec (20m; spent 20m)"), "{md}");
     assert!(
@@ -805,25 +854,57 @@ fn timer_runs_checkpoints_books_time_and_alarms() {
         h.app.timer().unwrap().checkpoint.as_deref(),
         Some("Write the code")
     );
+    assert_eq!(h.app.timer().unwrap().checkpoint_index, Some(1));
 
-    // v ticks it and, being the last, stops; M with nothing running just says so.
+    // v ticks the last one and stops.
     h.press(key(KeyCode::Char('v')));
     assert!(h.app.timer().is_none());
     assert!(h.context_md("alpha").contains("- [x] Write the code (1h)"));
-    h.press(key(KeyCode::Char('M')));
 
-    // Moving to the last column records `finished` and asks for an outcome.
+    // Finishing records the date without prompting; O records an outcome.
     h.press(key(KeyCode::Char(']')));
-    assert!(matches!(h.app.popup(), Some(Popup::Input { .. })));
+    h.press(key(KeyCode::Char(']')));
+    assert!(h.app.popup().is_none());
+    assert!(h.context_md("alpha").contains("- finished: "));
+    h.press(key(KeyCode::Char('O')));
     h.type_str("Shipped the parser");
     h.press(key(KeyCode::Enter));
-    let md = h.context_md("alpha");
-    assert!(md.contains("- finished: "), "{md}");
-    assert!(md.contains("## Outcome\n- "), "{md}");
-    assert!(md.contains("Shipped the parser"));
-    // Moving back clears `finished`.
+    assert!(h.context_md("alpha").contains("Shipped the parser"));
     h.press(key(KeyCode::Char('[')));
     assert!(!h.context_md("alpha").contains("- finished: "));
+    h.app.refresh_next_up();
+    assert!(h.app.today().today_min >= 20, "{:?}", h.app.today());
+}
+
+#[test]
+fn idle_pause_and_restart_restore_the_timer() {
+    let mut h = Harness::build(true, |cfg| cfg.timer.idle_minutes = 1);
+    fs::write(h.tasks.join("alpha/CONTEXT.md"), PLAN).unwrap();
+    h.press(key(KeyCode::Char('m')));
+    h.choose("start");
+    h.app.last_input = Instant::now().checked_sub(Duration::from_secs(90)).unwrap();
+    h.app.handle(AppEvent::Tick);
+    let t = h.app.timer().unwrap();
+    assert!(!t.is_running());
+    assert!(matches!(t.away, Some((_, timer::Away::Idle))));
+    h.press(key(KeyCode::Char('m')));
+    assert!(h.choice_index("resume, counting").is_some());
+    h.choose("resume without");
+    assert!(h.app.timer().unwrap().is_running());
+    assert!(h.app.timer().unwrap().elapsed(Instant::now()) < Duration::from_secs(5));
+
+    // Quit with the timer running: it comes back paused, offering the closed time.
+    h.app
+        .timer
+        .as_mut()
+        .unwrap()
+        .backdate(Duration::from_secs(3 * 60));
+    h.restart();
+    let t = h.app.timer().expect("restored timer");
+    assert_eq!(t.task_id, "alpha");
+    assert!(!t.is_running());
+    assert!(t.elapsed(Instant::now()) >= Duration::from_secs(180));
+    assert!(h.context_md("alpha").contains("spent 3m"));
 }
 
 #[test]
@@ -832,6 +913,8 @@ fn focus_block_without_checkpoints_and_checkpoint_popup() {
     h.press(key(KeyCode::Enter));
     h.press(key(KeyCode::Esc));
     h.press(key(KeyCode::Char('m')));
+    assert!(h.choice_index("start a focus block (25 min)").is_some());
+    h.choose("focus block of");
     assert!(matches!(h.app.popup(), Some(Popup::Input { value, .. }) if value == "25"));
     h.press(ctrl('u'));
     h.type_str("10");
@@ -847,10 +930,12 @@ fn focus_block_without_checkpoints_and_checkpoint_popup() {
     let md = h.context_md("alpha");
     assert!(md.contains("⏱ 4m focus block"), "{md}");
     assert!(md.contains("- time_spent: 4m"));
+    let session = fs::read_to_string(h.root.join("state/session.json")).unwrap();
+    assert!(session.contains("\"task_id\": \"alpha\""), "{session}");
 
     // The checkpoint popup ticks items and starts the timer on the selected one.
     fs::write(h.tasks.join("alpha/CONTEXT.md"), PLAN).unwrap();
-    h.app.handle(AppEvent::Tick); // picks up the outside edit
+    h.watch();
     assert_eq!(h.ctx().checkpoints.len(), 2);
     h.press(key(KeyCode::Esc));
     h.press(key(KeyCode::Char('k')));
@@ -924,7 +1009,7 @@ fn agent_writes_context_and_checkpoints() {
     h.press(key(KeyCode::Char('r')));
     assert!(!h.ctx().meta.context_ready);
     crate::cli::task_ready(h.app.config(), "alpha", true).unwrap();
-    h.app.handle(AppEvent::Tick);
+    h.watch();
     assert!(h.ctx().meta.context_ready);
 }
 
@@ -972,6 +1057,7 @@ fn gerrit_changes_are_found_and_recorded() {
             path: fw.path().to_path_buf(),
             main_branch: None,
         }];
+        cfg.gerrit_status_command = r#"for id in "$@"; do printf '{"change_id":"%s","number":7,"status":"NEW","labels":"CR+2"}\n' "$id"; done"#.into();
     });
     h.press(key(KeyCode::Enter));
     h.press(key(KeyCode::Esc));
@@ -984,7 +1070,7 @@ fn gerrit_changes_are_found_and_recorded() {
     let md = h.context_md("alpha");
     assert!(
         md.contains(&format!(
-            "- gerrit: fw {id} https://review.example.com/q/{id} :: Fix it"
+            "- gerrit: fw {id} https://review.example.com/q/{id} [NEW #7 CR+2] :: Fix it"
         )),
         "{md}"
     );
@@ -1037,9 +1123,8 @@ fn settings_help_and_source_test_run() {
         .unwrap();
     form.select(idx);
     h.press(key(KeyCode::Char('?')));
-    assert!(
-        matches!(h.app.popup(), Some(Popup::Doc { lines, .. }) if lines.iter().any(|l| l.contains("JSON array")))
-    );
+    assert!(matches!(h.app.popup(), Some(Popup::Help { tabs, tab, .. })
+        if tabs[*tab].1.iter().any(|l| l.contains("JSON array"))));
     h.press(key(KeyCode::Esc));
     h.press(key(KeyCode::Char('t')));
     assert!(h.pump_until(|app| matches!(app.popup(), Some(Popup::Doc { .. }))));
@@ -1047,4 +1132,281 @@ fn settings_help_and_source_test_run() {
         matches!(h.app.popup(), Some(Popup::Doc { lines, .. }) if lines.iter().any(|l| l.contains("J-1") && l.contains("One")))
     );
     assert!(!h.tasks.join("J-1").exists());
+}
+
+// ----- hooks, help, list, editor merge, keys, shells ------------------------------
+
+#[test]
+fn task_enter_hook_runs_before_the_task_view_and_others_get_env() {
+    let mut h = Harness::build(true, |cfg| {
+        cfg.hooks.insert(
+            "task_enter".into(),
+            r#"printf '%s|%s|%s|%s\n' "$PAHIRI_HOOK" "$PAHIRI_TASK" "$PAHIRI_COLUMN" "$PAHIRI_PREV_TASK" > enter.txt; "$PAHIRI_BIN" --version >/dev/null 2>&1; printf '\nhook note\n' >> CONTEXT.md; echo entered"#
+                .into(),
+        );
+        cfg.hooks.insert(
+            "task_move".into(),
+            r#"echo "$PAHIRI_FROM_COLUMN>$PAHIRI_TO_COLUMN:$PAHIRI_FINISHED" > "$PAHIRI_TASKS_DIR/moved.txt""#.into(),
+        );
+        cfg.hooks.insert("timer_start".into(), "exit 3".into());
+    });
+    h.press(key(KeyCode::Enter));
+    // The view is not shown until the hook finished.
+    assert!(matches!(h.app.mode(), Mode::TaskList));
+    assert!(matches!(
+        h.app.popup(),
+        Some(Popup::Log { done: false, .. })
+    ));
+    assert!(h.pump_until(|app| matches!(app.mode(), Mode::Task)));
+    assert!(h.app.popup().is_none(), "{:?}", h.app.popup());
+    assert_eq!(
+        fs::read_to_string(h.tasks.join("alpha/enter.txt")).unwrap(),
+        "task_enter|alpha|Planned|\n"
+    );
+    // What the hook wrote is what the task view shows.
+    assert!(h.ctx().tree.nodes().iter().any(|n| n.name == "enter.txt"));
+    assert!(h.context_md("alpha").contains("hook note"));
+    assert_eq!(h.app.status(), Some("task_enter: entered"));
+
+    // Background hooks: task_move gets the columns; a failing hook only sets a status.
+    h.press(key(KeyCode::Esc));
+    h.press(key(KeyCode::Char(']')));
+    let moved = h.tasks.join("moved.txt");
+    assert!(h.pump_until(|_| h_file(&moved).is_some()));
+    assert_eq!(
+        h_file(&h.tasks.join("moved.txt")).unwrap(),
+        "Planned>Doing:0\n"
+    );
+    h.press(key(KeyCode::Esc));
+    h.press(key(KeyCode::Char('m')));
+    h.choose("start");
+    assert!(h.pump_until(|app| app.hook_runs.iter().any(|r| r.event == "timer_start")));
+    let run = h
+        .app
+        .hook_runs
+        .iter()
+        .find(|r| r.event == "timer_start")
+        .unwrap();
+    assert!(!run.ok);
+    // The help page lists configured hooks and recent runs.
+    h.press(key(KeyCode::F(1)));
+    let Some(Popup::Help { tabs, .. }) = h.app.popup() else {
+        panic!("{:?}", h.app.popup());
+    };
+    let hooks_tab = &tabs[HelpTopic::Hooks.index()].1;
+    assert!(hooks_tab.iter().any(|l| l.contains("● task_enter")));
+    assert!(hooks_tab
+        .iter()
+        .any(|l| l.contains("timer_start") && l.contains("FAILED")));
+    assert!(hooks_tab.iter().any(|l| l.contains("$PAHIRI_FROM_COLUMN")));
+    h.press(key(KeyCode::Right));
+    assert!(matches!(h.app.popup(), Some(Popup::Help { tab: 1, .. })));
+    h.press(key(KeyCode::Char('x')));
+    assert!(h.app.popup().is_none());
+    h.app.shutdown();
+}
+
+fn h_file(p: &Path) -> Option<String> {
+    fs::read_to_string(p).ok()
+}
+
+#[test]
+fn list_filter_reorder_archive_and_outside_moves() {
+    let mut h = Harness::new(true);
+    fs::create_dir_all(h.tasks.join("gamma")).unwrap();
+    fs::write(
+        h.tasks.join("gamma/CONTEXT.md"),
+        "# gamma: Flux capacitor\n",
+    )
+    .unwrap();
+    h.watch();
+    assert!(h.app.rows().contains(&ListRow::Task(0, "gamma".into())));
+    // Filter by title words.
+    h.press(key(KeyCode::Char('/')));
+    h.type_str("flux");
+    h.press(key(KeyCode::Enter));
+    let tasks: Vec<ListRow> = h
+        .app
+        .rows()
+        .into_iter()
+        .filter(|r| matches!(r, ListRow::Task(..)))
+        .collect();
+    assert_eq!(tasks, vec![ListRow::Task(0, "gamma".into())]);
+    assert_eq!(selected_task(&h.app).as_deref(), Some("gamma"));
+    h.press(key(KeyCode::Esc));
+    assert!(h.app.list_filter().0.is_empty());
+    // J/K reorder within the column.
+    assert_eq!(
+        h.app.store().unwrap().board().columns[0].tasks,
+        vec!["alpha", "gamma"]
+    );
+    h.press(key(KeyCode::Char('K')));
+    assert_eq!(
+        h.app.store().unwrap().board().columns[0].tasks,
+        vec!["gamma", "alpha"]
+    );
+    // Another program moves a task: picked up without a restart.
+    crate::cli::task_move(h.app.config(), "gamma", "Done").unwrap();
+    h.watch();
+    assert_eq!(
+        h.app.store().unwrap().board().locate("gamma").map(|l| l.0),
+        Some(2)
+    );
+    // Finished long ago → archived (hidden until A).
+    crate::tasks::context::update_meta(&h.tasks.join("gamma/CONTEXT.md"), "gamma", |m| {
+        m.finished = Some("2020-01-01T00:00:00Z".into());
+    })
+    .unwrap();
+    h.app.refresh_next_up();
+    assert!(!h.app.rows().contains(&ListRow::Task(2, "gamma".into())));
+    assert_eq!(h.app.archived_count(2), 1);
+    h.press(key(KeyCode::Char('A')));
+    assert!(h.app.rows().contains(&ListRow::Task(2, "gamma".into())));
+}
+
+#[test]
+fn saving_context_merges_changes_made_by_pahiri_meanwhile() {
+    let mut h = Harness::new(true);
+    fs::write(h.tasks.join("alpha/CONTEXT.md"), PLAN).unwrap();
+    h.press(key(KeyCode::Enter));
+    h.press(key(KeyCode::Esc));
+    h.press(key(KeyCode::Char('o')));
+    h.press(key(KeyCode::End));
+    h.type_str(" edited");
+    assert!(h.ctx().editor.as_ref().unwrap().is_dirty());
+    // Meanwhile the timer books time and the CLI logs a line.
+    crate::cli::task_log(h.app.config(), "alpha", "from outside").unwrap();
+    let path = h.tasks.join("alpha/CONTEXT.md");
+    crate::tasks::context::update_meta(&path, "alpha", |m| m.time_spent_min = 42).unwrap();
+    h.press(ctrl('s'));
+    let md = h.context_md("alpha");
+    assert!(md.starts_with("# alpha edited\n"), "{md}");
+    assert!(md.contains("from outside"), "{md}");
+    assert!(md.contains("- time_spent: 42m"), "{md}");
+    assert!(!h.ctx().editor.as_ref().unwrap().is_dirty());
+    assert!(h.app.status().unwrap_or("").contains("merged"));
+    // Undo in the editor.
+    h.type_str("!");
+    h.press(ctrl('z'));
+    assert!(!h.ctx().editor.as_ref().unwrap().text().contains("edited!"));
+    // Find.
+    h.press(ctrl('f'));
+    h.type_str("write the");
+    h.press(key(KeyCode::Enter));
+    let (row, _) = h.ctx().editor.as_ref().unwrap().cursor();
+    assert!(h.ctx().editor.as_ref().unwrap().lines()[row].contains("Write the code"));
+}
+
+#[test]
+fn existing_ticket_offers_open_or_refresh() {
+    let script =
+        r#"printf '%s' '[{"id":"alpha","title":"Alpha","description":"Fresh description"}]'"#;
+    let mut h = Harness::build(true, |cfg| {
+        cfg.task_sources = vec![TaskSource {
+            name: "jira".into(),
+            command: script.into(),
+        }];
+    });
+    h.press(key(KeyCode::Char('n')));
+    h.press(key(KeyCode::Char('2')));
+    assert!(h.pump_until(|app| matches!(app.popup(), Some(Popup::Tickets { .. }))));
+    h.press(key(KeyCode::Enter));
+    assert!(popup_title(&h.app).contains("already exists"));
+    h.choose("refresh its ## Description");
+    assert!(h.pump_until(|app| matches!(app.mode(), Mode::Task)));
+    assert!(h
+        .context_md("alpha")
+        .contains("## Description\n\nFresh description\n"));
+}
+
+#[test]
+fn key_overrides_change_palette_and_leader() {
+    let mut h = Harness::build(true, |cfg| {
+        cfg.keys.insert("palette.timer".into(), "u".into());
+        cfg.keys.insert("leader.help".into(), "H".into());
+    });
+    h.press(key(KeyCode::Esc));
+    h.press(key(KeyCode::Char('u')));
+    assert!(popup_title(&h.app).starts_with("Timer"));
+    h.press(key(KeyCode::Esc));
+    h.press(key(KeyCode::Enter));
+    assert!(h.pump_until(|app| matches!(app.mode(), Mode::Task)));
+    h.press(ctrl('b'));
+    h.press(KeyEvent::new(KeyCode::Char('H'), KeyModifiers::SHIFT));
+    assert!(matches!(h.app.popup(), Some(Popup::Help { .. })));
+}
+
+#[test]
+fn shells_are_restored_after_a_restart() {
+    let mut h = Harness::new(true);
+    h.press(key(KeyCode::Enter));
+    h.press(key(KeyCode::Char('t')));
+    h.type_str("cd scripts");
+    h.press(key(KeyCode::Enter));
+    let scripts = fs::canonicalize(h.tasks.join("alpha/scripts")).unwrap();
+    assert!(h.pump_until(|app| {
+        app.active_context()
+            .and_then(TaskContext::active_shell)
+            .and_then(|s| s.session.cwd())
+            .is_some_and(|c| c == scripts)
+    }));
+    h.restart();
+    assert!(matches!(h.app.mode(), Mode::TaskList));
+    h.press(key(KeyCode::Enter));
+    assert_eq!(h.ctx().shells.len(), 1);
+    assert!(h.pump_until(|app| {
+        app.active_context()
+            .and_then(TaskContext::active_shell)
+            .and_then(|s| s.session.cwd())
+            .is_some_and(|c| c == scripts)
+    }));
+    h.app.shutdown();
+}
+
+#[test]
+fn tmux_backed_shells_survive_pahiri() {
+    if Command::new("tmux").arg("-V").output().is_err() {
+        return;
+    }
+    let socket = format!("pahiri-test-{}", std::process::id());
+    std::env::set_var("PAHIRI_TMUX_SOCKET", &socket);
+    let mut h = Harness::build(true, |cfg| cfg.shell.tmux = true);
+    h.press(key(KeyCode::Enter));
+    h.press(key(KeyCode::Char('t')));
+    let name = h
+        .ctx()
+        .active_shell()
+        .unwrap()
+        .tmux
+        .clone()
+        .expect("tmux session");
+    assert_eq!(name, "pahiri-alpha-1");
+    let alive = |n: &str| {
+        Command::new("tmux")
+            .args(["-L", &socket, "has-session", "-t", n])
+            .output()
+            .is_ok_and(|o| o.status.success())
+    };
+    assert!(alive("pahiri-alpha-1"), "created before pahiri attaches");
+    h.restart();
+    assert!(alive(&name), "session survives pahiri exiting");
+    h.press(key(KeyCode::Enter));
+    assert_eq!(h.ctx().shells[0].tmux.as_deref(), Some(name.as_str()));
+    assert!(h.pump_until(|app| {
+        app.active_context()
+            .and_then(TaskContext::active_shell)
+            .is_some_and(|s| !s.session.screen().contents().trim().is_empty())
+    }));
+    // Closing the shell in pahiri ends the session.
+    h.press(ctrl('b'));
+    h.press(key(KeyCode::Char('x')));
+    assert!(matches!(h.app.popup(), Some(Popup::Confirm { .. })));
+    h.press(key(KeyCode::Char('y')));
+    assert!(h.ctx().shells.is_empty());
+    assert!(h.pump_until(|_| !alive(&name)));
+    let _ = Command::new("tmux")
+        .args(["-L", &socket, "kill-server"])
+        .output();
+    std::env::remove_var("PAHIRI_TMUX_SOCKET");
+    h.app.shutdown();
 }

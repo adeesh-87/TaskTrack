@@ -4,6 +4,7 @@ use std::collections::BTreeSet;
 use std::fs;
 use std::io;
 use std::path::{Path, PathBuf};
+use std::time::SystemTime;
 
 /// One visible row of the tree.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -28,6 +29,12 @@ pub struct FileTree {
     expanded: BTreeSet<PathBuf>,
     nodes: Vec<Node>,
     selected: usize,
+    /// Modification times of the root and every expanded folder at the last refresh.
+    dir_mtimes: Vec<(PathBuf, Option<SystemTime>)>,
+}
+
+fn mtime(path: &Path) -> Option<SystemTime> {
+    fs::metadata(path).and_then(|m| m.modified()).ok()
 }
 
 impl FileTree {
@@ -39,6 +46,7 @@ impl FileTree {
             expanded: BTreeSet::new(),
             nodes: Vec::new(),
             selected: 0,
+            dir_mtimes: Vec::new(),
         };
         tree.refresh()?;
         Ok(tree)
@@ -95,11 +103,23 @@ impl FileTree {
         let root = self.root.clone();
         self.walk(&root, 0, &mut nodes)?;
         self.nodes = nodes;
+        self.dir_mtimes = std::iter::once(root.clone())
+            .chain(self.expanded.iter().cloned())
+            .map(|p| {
+                let m = mtime(&p);
+                (p, m)
+            })
+            .collect();
         self.selected = previous
             .and_then(|p| self.nodes.iter().position(|n| n.path == p))
             .unwrap_or(0)
             .min(self.nodes.len().saturating_sub(1));
         Ok(())
+    }
+
+    /// Whether a shown folder changed on disk since the last refresh.
+    pub fn changed_on_disk(&self) -> bool {
+        self.dir_mtimes.iter().any(|(p, m)| mtime(p) != *m)
     }
 
     fn walk(&self, dir: &Path, depth: usize, out: &mut Vec<Node>) -> io::Result<()> {
