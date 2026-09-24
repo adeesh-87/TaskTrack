@@ -2,13 +2,14 @@
 
 use std::io;
 use std::path::{Path, PathBuf};
+use std::time::SystemTime;
 
 use crate::config::Config;
 use crate::editor::Buffer;
 use crate::files::FileTree;
 use crate::highlight::{Language, State};
 use crate::tasks::context::{read_meta, write_meta};
-use crate::tasks::{TaskMeta, TaskSummary};
+use crate::tasks::{checkpoints, Checkpoint, TaskMeta, TaskSummary};
 use crate::terminal::shellrc::{self, TaskEnv};
 use crate::terminal::{PtySession, ShellId, SpawnOptions};
 
@@ -89,7 +90,15 @@ pub struct TaskContext {
     pub env_file: Option<PathBuf>,
     /// Highlight cache for the open document.
     pub highlight: Option<HighlightCache>,
+    /// Checkpoints from the context file.
+    pub checkpoints: Vec<Checkpoint>,
+    /// Modification time of the context file when it was last read.
+    context_mtime: Option<SystemTime>,
     next_number: usize,
+}
+
+fn mtime(path: &Path) -> Option<SystemTime> {
+    std::fs::metadata(path).and_then(|m| m.modified()).ok()
 }
 
 impl TaskContext {
@@ -97,6 +106,7 @@ impl TaskContext {
     pub fn new(summary: &TaskSummary, context_path: &Path, show_hidden: bool) -> io::Result<Self> {
         let tree = FileTree::new(&summary.dir, show_hidden)?;
         let meta = read_meta(context_path)?;
+        let checkpoints = checkpoints::read(context_path)?;
         Ok(Self {
             id: summary.id.clone(),
             dir: summary.dir.clone(),
@@ -111,19 +121,30 @@ impl TaskContext {
             zoomed: false,
             env_file: None,
             highlight: None,
+            checkpoints,
+            context_mtime: mtime(context_path),
             next_number: 1,
         })
     }
 
-    /// Re-read metadata from the context file (e.g. after the user edited it).
+    /// Re-read metadata and checkpoints from the context file.
     pub fn reload_meta(&mut self) -> io::Result<()> {
+        self.context_mtime = mtime(&self.context_path);
         self.meta = read_meta(&self.context_path)?;
+        self.checkpoints = checkpoints::read(&self.context_path)?;
         Ok(())
     }
 
+    /// Whether the context file changed since it was last read.
+    pub fn context_changed_on_disk(&self) -> bool {
+        mtime(&self.context_path) != self.context_mtime
+    }
+
     /// Persist metadata into the context file.
-    pub fn save_meta(&self) -> io::Result<()> {
-        write_meta(&self.context_path, &self.id, &self.meta)
+    pub fn save_meta(&mut self) -> io::Result<()> {
+        write_meta(&self.context_path, &self.id, &self.meta)?;
+        self.context_mtime = mtime(&self.context_path);
+        Ok(())
     }
 
     /// Environment describing this task for shells.
@@ -334,6 +355,30 @@ impl TaskContext {
         if let Some(b) = &self.meta.branch {
             parts.push(format!("branch: {b}"));
         }
+        if !self.meta.gerrit.is_empty() {
+            parts.push(format!("gerrit: {}", self.meta.gerrit.len()));
+        }
         parts.join(" · ")
+    }
+
+    /// One-line plan status: context readiness and the next checkpoint.
+    pub fn plan_summary(&self) -> String {
+        let ready = if self.meta.context_ready {
+            "context ready"
+        } else {
+            "context not ready"
+        };
+        match checkpoints::next_open(&self.checkpoints) {
+            Some(i) => format!(
+                "▸ {} ({}) · {}",
+                self.checkpoints[i].title,
+                checkpoints::fmt_minutes(self.checkpoints[i].estimate_min),
+                checkpoints::summary(&self.checkpoints)
+            ),
+            None if !self.checkpoints.is_empty() => {
+                format!("all {} checkpoints done", self.checkpoints.len())
+            }
+            None => format!("{ready} · no checkpoints"),
+        }
     }
 }

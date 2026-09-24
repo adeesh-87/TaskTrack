@@ -2,7 +2,7 @@
 
 use std::sync::mpsc;
 
-use crate::tasks::Ticket;
+use crate::tasks::{GerritRef, Ticket};
 use crate::terminal::PtyEvent;
 
 /// Progress and results of background jobs (scripts, git).
@@ -16,6 +16,26 @@ pub enum JobEvent {
         source: String,
         /// Tickets, or an error message.
         result: Result<Vec<Ticket>, String>,
+        /// A dry run from the settings page (show, don't create).
+        test: bool,
+    },
+    /// Gerrit detection finished.
+    Gerrit {
+        /// Task id.
+        task_id: String,
+        /// Changes found.
+        found: Vec<GerritRef>,
+        /// Whether at least one workspace could be scanned.
+        scanned: bool,
+    },
+    /// A one-shot agent call finished.
+    Agent {
+        /// Task id.
+        task_id: String,
+        /// Which prompt ran.
+        kind: crate::ai::PromptKind,
+        /// Agent stdout, or an error.
+        result: Result<String, String>,
     },
     /// The prepare sequence finished for all workspaces.
     PrepareDone {

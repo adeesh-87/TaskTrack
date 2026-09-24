@@ -45,6 +45,28 @@ pub enum Action {
     CloseEditor,
     /// Show the key reference.
     Help,
+    /// Move the task folder to the trash.
+    DeleteTask,
+    /// Start / pause / resume the checkpoint timer.
+    Timer,
+    /// Stop the timer and book the time.
+    StopTimer,
+    /// Tick the current checkpoint and move on to the next.
+    CheckpointDone,
+    /// Show the checkpoints.
+    Checkpoints,
+    /// Find Gerrit changes on the task branches.
+    Gerrit,
+    /// Ask the agent to write the task context.
+    GenerateContext,
+    /// Mark the context ready / not ready.
+    ToggleContextReady,
+    /// Ask the agent to break the task into checkpoints.
+    BreakDown,
+    /// Launch the interactive coding agent in a new shell.
+    CodingAgent,
+    /// Open a prompt template in the editor.
+    EditPrompts,
 }
 
 /// A palette entry.
@@ -70,8 +92,17 @@ pub fn list_commands() -> Vec<Command> {
             "new task (custom or from Jira/Orbit/...)",
             Action::NewTask,
         ),
+        cmd(
+            'm',
+            "timer: start / pause / resume (selected task)",
+            Action::Timer,
+        ),
+        cmd('M', "timer: stop and book the time", Action::StopTimer),
+        cmd('v', "checkpoint done → next", Action::CheckpointDone),
+        cmd('k', "checkpoints of the selected task", Action::Checkpoints),
         cmd(']', "move task to next category", Action::MoveNext),
         cmd('[', "move task to previous category", Action::MovePrev),
+        cmd('D', "delete task (moves it to .trash)", Action::DeleteTask),
         cmd('r', "rescan tasks folder", Action::Refresh),
         cmd('c', "configuration", Action::Config),
         cmd('h', "help / keys", Action::Help),
@@ -93,6 +124,28 @@ pub fn task_commands() -> Vec<Command> {
             "attach code workspaces / vendor builds",
             Action::Attach,
         ),
+        cmd('m', "timer: start / pause / resume", Action::Timer),
+        cmd('M', "timer: stop and book the time", Action::StopTimer),
+        cmd('v', "checkpoint done → next", Action::CheckpointDone),
+        cmd('k', "checkpoints", Action::Checkpoints),
+        cmd('i', "AI: write the task context", Action::GenerateContext),
+        cmd('r', "context ready: toggle", Action::ToggleContextReady),
+        cmd(
+            'b',
+            "AI: break the task into checkpoints",
+            Action::BreakDown,
+        ),
+        cmd(
+            'l',
+            "coding agent: launch it for this task",
+            Action::CodingAgent,
+        ),
+        cmd(
+            'g',
+            "find Gerrit changes on the task branches",
+            Action::Gerrit,
+        ),
+        cmd('E', "edit AI prompt templates", Action::EditPrompts),
         cmd('s', "new shell", Action::NewShell),
         cmd('x', "close selected shell", Action::CloseShell),
         cmd('o', "open CONTEXT.md", Action::OpenContext),
@@ -107,6 +160,7 @@ pub fn task_commands() -> Vec<Command> {
         cmd('S', "save editor buffer", Action::Save),
         cmd('W', "close editor buffer", Action::CloseEditor),
         cmd('n', "new task", Action::NewTask),
+        cmd('D', "delete task (moves it to .trash)", Action::DeleteTask),
         cmd('c', "configuration", Action::Config),
         cmd('h', "help / keys", Action::Help),
         cmd('q', "quit pahiri", Action::Quit),

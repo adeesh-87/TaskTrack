@@ -943,6 +943,7 @@ dependencies = [
  "ratatui",
  "serde",
  "serde_json",
+ "shell-words",
  "tempfile",
  "thiserror 2.0.21",
  "toml",

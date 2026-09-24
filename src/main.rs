@@ -3,10 +3,9 @@
 use std::io;
 use std::path::PathBuf;
 use std::sync::mpsc::RecvTimeoutError;
-use std::time::Duration;
 
 use anyhow::{Context as _, Result};
-use clap::Parser;
+use clap::{Parser, Subcommand};
 use crossterm::event::{
     DisableBracketedPaste, DisableMouseCapture, EnableBracketedPaste, EnableMouseCapture,
     KeyboardEnhancementFlags, PopKeyboardEnhancementFlags, PushKeyboardEnhancementFlags,
@@ -33,6 +32,96 @@ struct Cli {
     /// Print the resolved config and paths, then exit.
     #[arg(long)]
     show_config: bool,
+    #[command(subcommand)]
+    cmd: Option<Cmd>,
+}
+
+#[allow(clippy::doc_markdown)] // doc comments double as --help text
+#[derive(Debug, Subcommand)]
+enum Cmd {
+    /// Task helpers for scripts and agents (default task: $PAHIRI_TASK).
+    Task {
+        #[command(subcommand)]
+        cmd: TaskCmd,
+    },
+    /// Summarise tasks active in a date range (input for reviews and standups).
+    Report {
+        /// First day, YYYY-MM-DD.
+        #[arg(long)]
+        from: Option<String>,
+        /// Last day, YYYY-MM-DD.
+        #[arg(long)]
+        to: Option<String>,
+        /// JSON instead of Markdown.
+        #[arg(long)]
+        json: bool,
+    },
+    /// Write the bundled agent skills to DIR/<name>/SKILL.md
+    /// (e.g. ~/.claude/skills or <tasks>/.agents/skills).
+    InstallSkills {
+        /// Target folder.
+        dir: PathBuf,
+        /// Overwrite skills that already exist.
+        #[arg(long)]
+        force: bool,
+    },
+}
+
+#[allow(clippy::doc_markdown)]
+#[derive(Debug, Subcommand)]
+enum TaskCmd {
+    /// Mark the task context ready for planning (--off: not ready).
+    Ready {
+        /// Task id (default $PAHIRI_TASK).
+        #[arg(long)]
+        task: Option<String>,
+        /// Mark it not ready.
+        #[arg(long)]
+        off: bool,
+    },
+    /// Append a timestamped line to the task's ## Log.
+    Log {
+        /// Task id (default $PAHIRI_TASK).
+        #[arg(long)]
+        task: Option<String>,
+        /// The message.
+        #[arg(required = true)]
+        message: Vec<String>,
+    },
+    /// Print the current checkpoint.
+    Next {
+        /// Task id (default $PAHIRI_TASK).
+        #[arg(long)]
+        task: Option<String>,
+    },
+}
+
+fn run_command(cmd: Cmd, config: Option<&Config>, config_path: &std::path::Path) -> Result<()> {
+    use pahiri::cli;
+    if let Cmd::InstallSkills { dir, force } = &cmd {
+        let dir = Config::expand_tilde(&dir.display().to_string());
+        print!("{}", cli::install_skills(&dir, *force)?);
+        return Ok(());
+    }
+    let cfg = config.with_context(|| {
+        format!(
+            "no config at {} yet: start pahiri once to create it",
+            config_path.display()
+        )
+    })?;
+    let out = match cmd {
+        Cmd::Task { cmd } => match cmd {
+            TaskCmd::Ready { task, off } => cli::task_ready(cfg, &cli::resolve_task(task)?, !off)?,
+            TaskCmd::Log { task, message } => {
+                cli::task_log(cfg, &cli::resolve_task(task)?, &message.join(" "))?
+            }
+            TaskCmd::Next { task } => cli::task_next(cfg, &cli::resolve_task(task)?)?,
+        },
+        Cmd::Report { from, to, json } => cli::report(cfg, from.as_deref(), to.as_deref(), json)?,
+        Cmd::InstallSkills { .. } => unreachable!("handled above"),
+    };
+    println!("{out}");
+    Ok(())
 }
 
 fn init_logging(level: &str) -> Option<PathBuf> {
@@ -67,6 +156,10 @@ fn main() -> Result<()> {
         let mut cfg = config.take().unwrap_or_default();
         cfg.tasks_dir = Config::expand_tilde(&dir.display().to_string());
         config = Some(cfg);
+    }
+
+    if let Some(cmd) = cli.cmd {
+        return run_command(cmd, config.as_ref(), &config_path);
     }
 
     if cli.show_config {
@@ -141,12 +234,17 @@ fn run(
     app: &mut App,
     rx: &std::sync::mpsc::Receiver<AppEvent>,
 ) -> Result<()> {
-    const TICK: Duration = Duration::from_millis(250);
     loop {
         terminal
             .draw(|f| pahiri::ui::draw(f, app))
             .context("drawing frame")?;
-        match rx.recv_timeout(TICK) {
+        if app.take_bell() {
+            use std::io::Write as _;
+            let mut out = io::stdout();
+            let _ = out.write_all(b"\x07");
+            let _ = out.flush();
+        }
+        match rx.recv_timeout(app.tick_interval()) {
             Ok(ev) => app.handle(ev),
             Err(RecvTimeoutError::Timeout) => app.handle(AppEvent::Tick),
             Err(RecvTimeoutError::Disconnected) => break,

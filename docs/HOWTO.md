@@ -1,0 +1,80 @@
+# How to make common changes
+
+Each recipe lists every place to touch. Run fmt, clippy and tests after.
+
+## Add a palette command (Esc menu)
+
+1. `src/app/palette.rs`: add a variant to `Action`; add
+   `cmd('<key>', "<label>", Action::X)` to `list_commands()` and/or
+   `task_commands()`. Keys must be unique per list (a test checks).
+2. `src/app/mod.rs` → `run_action`: add `Action::X => self.do_x(),`.
+3. Implement `do_x` in the fitting file (`work.rs`, `agent.rs`, or `mod.rs`).
+4. `src/app/keymap.rs` `HELP` and the README palette table.
+5. Test in `src/app/tests.rs`: `h.press(key(KeyCode::Esc)); h.press(key(KeyCode::Char('<key>')));`
+   then assert on `h.app` or the files.
+
+## Add a direct key
+
+- Task list: `handle_list_key` in `src/app/mod.rs`.
+- Task panes: `handle_tree_key` / `handle_editor_key` / `handle_shell_list_key`.
+- After the leader key (any task pane): `handle_leader_command`.
+Prefer calling `self.run_action(Action::X)` so keys and palette stay in sync.
+
+## Add a setting
+
+1. `src/config/mod.rs`: field on `Config` (or `AgentConfig` / `CodingAgentConfig` /
+   `TimerConfig`) with a doc comment, a default in `Default`, a check in
+   `validate()` if values can be wrong. `#[serde(default)]` keeps old files loading.
+2. `src/app/config_form.rs`: `FieldKey` variant; a `field(...)` entry in
+   `ConfigForm::new` (label, help, `Value::Text|Number|Toggle|List`); a match arm in
+   `to_config`. For long help, map the key in `App::config_help` (`src/app/mod.rs`).
+3. README settings table.
+
+## Add a popup
+
+1. `src/app/popup.rs`: variant on `Popup` (and `title()` arm).
+2. `src/app/mod.rs` → `handle_popup_key`: the popup is `take()`n; put it back
+   (`self.popup = Some(...)`) unless the key closes it.
+3. `src/ui/popup.rs` → `draw`: produce its `lines`.
+For yes/no, input or choices, reuse `Popup::confirm/input/choose` with a new
+`Pending` variant handled in `run_pending`.
+
+## Record something in CONTEXT.md
+
+- Machine field (dates, flags): add it to `TaskMeta` in `src/tasks/context.rs`
+  (`parse` + `render_block`), write with `update_meta(path, id, |m| …)`.
+- Timestamped line: `append_log(path, id, &now_rfc3339(), "text")` or
+  `append_under(..., "## Heading", ...)`.
+- A pahiri-owned block of text: `sections::upsert` with new markers.
+Then call `self.after_task_file_change(id)` so the UI reloads it.
+
+## Run something in the background
+
+Copy `run_agent` or `find_gerrit` (`src/app/agent.rs`): open `Popup::log`, spawn a
+thread that sends `JobEvent::Log(line)` for progress and one final `JobEvent`
+(add a variant in `event.rs`), handle it in `handle_job` (`mod.rs`). For
+cancellation keep an `Arc<AtomicBool>` in `self.job_cancel`.
+
+## Add a CLI subcommand
+
+`src/main.rs`: variant in `Cmd`/`TaskCmd` + arm in `run_command`;
+logic as a function returning `Result<String>` in `src/cli.rs` with a test.
+
+## Change a prompt or its fixed format
+
+Editable defaults: `DEFAULT_*` in `src/ai/mod.rs` (users' copies live in their
+prompts folder and win). Fixed formats: `CONTEXT_FORMAT` / `CHECKPOINT_FORMAT`;
+if you change them, keep `parse_context_answer` / `checkpoints::parse_list` in sync.
+
+## Add a skill
+
+Write `.agents/skills/<name>/SKILL.md` (front matter `name`, `description`) and
+add it to `SKILLS` in `src/cli.rs`.
+
+## Tests
+
+- Unit tests live next to the code (`#[cfg(test)] mod tests`).
+- App behaviour: `Harness::new(true)` gives tasks `alpha` (with `scripts/run.sh`)
+  and `beta` (in Doing), bash shells, and a temp dir; `h.press`, `h.type_str`,
+  `h.pump_until(|app| …)` for background jobs, `h.context_md("alpha")`.
+- Fake agents: `fake_agent(cfg, "<sh script>")` — the prompt arrives on stdin.

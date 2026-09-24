@@ -43,10 +43,23 @@ open(jira, "w").write(
 )
 os.chmod(jira, 0o755)
 
+# A fake one-shot agent: answers the context prompt, then the checkpoint prompt.
+agent = os.path.join(work, "agent.sh")
+open(agent, "w").write(
+    "#!/bin/sh\nprompt=$(cat)\n"
+    "case \"$prompt\" in\n"
+    "  *'checklist only'*) printf -- '- [ ] Tiny warm-up (1m; spent 1m)\\n- [ ] Flux the capacitor (45m)\\n' ;;\n"
+    "  *) printf '### Goal\\n- make it flux\\n\\nCONTEXT_READY: yes\\n' ;;\n"
+    "esac\n"
+)
+os.chmod(agent, 0o755)
+
 cfg = os.path.join(work, "config.toml")
 open(cfg, "w").write(
     f'tasks_dir = "{tasks}"\n'
     f'[shell]\nprogram = "bash"\nargs = ["--norc", "-i"]\n'
+    f'[agent]\ncommand = "{agent}"\nargs = []\n'
+    f'[timer]\nbell = false\n'
     f'[[workspaces]]\nname = "fw"\npath = "{repo}"\n'
     f'[[task_sources]]\nname = "jira"\ncommand = "{jira}"\n'
 )
@@ -160,11 +173,44 @@ dump("back to list", "PLANNED")
 send("\x1b"); send("c", 0.8)                   # config
 dump("settings", "Code workspaces")
 send("\x1b", 0.5)
+dump("next up", "next up")
+
+# AI context → ready → checkpoints → timer → time's up (flash) → done.
+send("\r", 1.0)                                # open PROJ-42 again (terminal focused)
+send("\x02q", 0.5)                             # leader q: leave the shell
+send("\x1b"); send("i", 0.5)
+wait_for("context ready: yes")
+dump("ai context", "wrote")
+send("\r", 0.5)
+send("\x1b"); send("b", 0.5)
+wait_for("written to ## Checkpoints")
+dump("ai checkpoints", "Flux the capacitor")
+send("\r", 0.5)
+send("\x1b"); send("m", 0.2)                   # timer on "Tiny warm-up": no time left
+flashed = False
+end = time.time() + 3
+while time.time() < end and not flashed:
+    pump(0.05)
+    flashed = any(screen.buffer[y][x].reverse for y in range(ROWS) for x in range(0, COLS, 7))
+wait_for("Time's up")
+dump("time's up", "done — start next: Flux the capacitor")
+if not flashed:
+    failures.append("screen did not flash")
+send("1", 0.8)                                 # done → next checkpoint, timer running
+dump("timer running", "Flux the capacitor")
+if "⏱ PROJ-42" not in text():
+    failures.append("timer not shown in the status bar")
+send("\x1b"); send("M", 0.5)                   # stop and book
+send("\x1b"); send("T", 0.8)
 send("\x1b"); send("q", 0.5)                   # quit → confirm (shell running)
 dump("quit confirm", "Quit pahiri?")
 send("y", 1.0)
 child.expect(pexpect.EOF, timeout=5)
 print("exit status", child.exitstatus)
+ctx = open(os.path.join(tasks, "PROJ-42", "CONTEXT.md")).read()
+for needle in ("- [x] Tiny warm-up", "- context_ready: true", "## Log", "- started: "):
+    if needle not in ctx:
+        failures.append(f"CONTEXT.md lacks {needle!r}")
 branch = subprocess.run(["git", "-C", repo, "branch", "--show-current"], capture_output=True, text=True).stdout.strip()
 print("workspace branch:", branch)
 if branch != "PROJ-42":

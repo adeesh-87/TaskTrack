@@ -178,10 +178,177 @@ pub fn prepare(req: &PrepareRequest, log: &mut dyn FnMut(String)) -> Result<(), 
     Ok(())
 }
 
+/// Guess a checkout's main branch: `origin/HEAD` when the remote advertises
+/// it, else the first of `main`, `master`, `develop` that exists locally.
+pub fn detect_main_branch(path: &Path) -> Option<String> {
+    if let Ok(r) = git(
+        path,
+        &[
+            "symbolic-ref",
+            "--quiet",
+            "--short",
+            "refs/remotes/origin/HEAD",
+        ],
+    ) {
+        if let Some(b) = r.strip_prefix("origin/") {
+            return Some(b.to_owned());
+        }
+    }
+    ["main", "master", "develop"]
+        .into_iter()
+        .find(|b| branch_exists(path, b))
+        .map(str::to_owned)
+}
+
+/// A commit on the task branch carrying a Gerrit `Change-Id` trailer.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct GerritCommit {
+    /// Commit sha.
+    pub sha: String,
+    /// Subject line.
+    pub subject: String,
+    /// `I` + 40 hex digits.
+    pub change_id: String,
+}
+
+/// The `Change-Id` trailer of a commit message body (last one wins, like Gerrit).
+pub fn change_id(body: &str) -> Option<String> {
+    body.lines().rev().find_map(|l| {
+        let v = l.trim().strip_prefix("Change-Id:")?.trim();
+        (v.len() == 41 && v.starts_with('I') && v[1..].bytes().all(|b| b.is_ascii_hexdigit()))
+            .then(|| v.to_owned())
+    })
+}
+
+/// Commits reachable from `task_branch` but not from the main branch (preferring
+/// `origin/<main>` when it exists), that carry a `Change-Id`. Oldest first.
+pub fn gerrit_commits(
+    path: &Path,
+    main_branch: &str,
+    task_branch: &str,
+) -> Result<Vec<GerritCommit>, GitError> {
+    let remote_main = format!("origin/{main_branch}");
+    let base = if git(path, &["rev-parse", "--verify", "--quiet", &remote_main]).is_ok() {
+        remote_main
+    } else {
+        main_branch.to_owned()
+    };
+    let range = format!("{base}..{task_branch}");
+    let out = git(
+        path,
+        &["log", "--reverse", "--format=%H%x1f%s%x1f%B%x1e", &range],
+    )?;
+    Ok(out
+        .split('\u{1e}')
+        .filter_map(|rec| {
+            let mut f = rec.trim_start_matches('\n').splitn(3, '\u{1f}');
+            let sha = f.next()?.trim().to_owned();
+            let subject = f.next()?.to_owned();
+            let body = f.next().unwrap_or("");
+            let change_id = change_id(body)?;
+            Some(GerritCommit {
+                sha,
+                subject,
+                change_id,
+            })
+        })
+        .collect())
+}
+
+/// Web base URL of the Gerrit server behind the `origin` remote:
+/// `ssh://me@review.example.com:29418/proj` → `https://review.example.com`.
+pub fn gerrit_base_url(path: &Path) -> Option<String> {
+    let url = git(path, &["config", "--get", "remote.origin.url"]).ok()?;
+    gerrit_base_from_remote(&url)
+}
+
+/// See [`gerrit_base_url`].
+pub fn gerrit_base_from_remote(url: &str) -> Option<String> {
+    let url = url.trim();
+    let host = if let Some(rest) = url
+        .strip_prefix("ssh://")
+        .or_else(|| url.strip_prefix("https://"))
+        .or_else(|| url.strip_prefix("http://"))
+    {
+        let authority = rest.split('/').next()?;
+        let host = authority.rsplit('@').next()?;
+        host.split(':').next()?.to_owned()
+    } else if let Some((user_host, _)) = url.split_once(':') {
+        // scp-like: me@host:project
+        user_host.rsplit('@').next()?.to_owned()
+    } else {
+        return None;
+    };
+    (!host.is_empty() && !url.starts_with('/')).then(|| format!("https://{host}"))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
     use std::fs;
+
+    #[test]
+    fn gerrit_detection() {
+        let dir = repo("main");
+        let p = dir.path();
+        git(p, &["switch", "-q", "-c", "T-1"]).unwrap();
+        fs::write(p.join("x"), "1").unwrap();
+        git(p, &["add", "-A"]).unwrap();
+        let id = format!("I{}", "a".repeat(40));
+        git(
+            p,
+            &[
+                "commit",
+                "-q",
+                "-m",
+                &format!("Fix it\n\nBody.\n\nChange-Id: {id}"),
+            ],
+        )
+        .unwrap();
+        fs::write(p.join("y"), "1").unwrap();
+        git(p, &["add", "-A"]).unwrap();
+        git(p, &["commit", "-q", "-m", "wip without id"]).unwrap();
+        let found = gerrit_commits(p, "main", "T-1").unwrap();
+        assert_eq!(found.len(), 1);
+        assert_eq!(found[0].subject, "Fix it");
+        assert_eq!(found[0].change_id, id);
+        assert!(gerrit_commits(p, "main", "nope").is_err());
+        assert_eq!(detect_main_branch(p).as_deref(), Some("main"));
+        assert!(gerrit_base_url(p).is_none());
+        git(
+            p,
+            &[
+                "remote",
+                "add",
+                "origin",
+                "ssh://me@review.example.com:29418/fw",
+            ],
+        )
+        .unwrap();
+        assert_eq!(
+            gerrit_base_url(p).as_deref(),
+            Some("https://review.example.com")
+        );
+    }
+
+    #[test]
+    fn remote_url_shapes() {
+        for (url, want) in [
+            (
+                "ssh://me@g.example.com:29418/a/b",
+                Some("https://g.example.com"),
+            ),
+            (
+                "https://g.example.com/a/proj",
+                Some("https://g.example.com"),
+            ),
+            ("me@g.example.com:proj.git", Some("https://g.example.com")),
+            ("/local/path", None),
+        ] {
+            assert_eq!(gerrit_base_from_remote(url).as_deref(), want, "{url}");
+        }
+        assert_eq!(change_id("x\nChange-Id: Ibad"), None);
+    }
 
     fn repo(main: &str) -> tempfile::TempDir {
         let dir = tempfile::tempdir().unwrap();

@@ -2,6 +2,8 @@
 
 use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 
+use std::path::PathBuf;
+
 use crate::config::{ColorScheme, Config, TaskSource, VendorBuild, Workspace};
 
 /// Which configuration value a field edits.
@@ -45,6 +47,34 @@ pub enum FieldKey {
     StatusFile,
     /// Context file name.
     ContextFile,
+    /// Gerrit web URL override.
+    GerritUrl,
+    /// One-shot agent program.
+    AgentCommand,
+    /// One-shot agent arguments.
+    AgentArgs,
+    /// One-shot agent timeout.
+    AgentTimeout,
+    /// Word limit for generated context.
+    ContextWords,
+    /// Context prompt template path.
+    ContextPrompt,
+    /// Checkpoint prompt template path.
+    CheckpointPrompt,
+    /// Coding agent program.
+    CodingCommand,
+    /// Coding agent arguments.
+    CodingArgs,
+    /// Coding agent startup prompt path.
+    CodingPrompt,
+    /// Start the coding agent in the code workspace.
+    CodingStartInCode,
+    /// Focus block minutes.
+    FocusMinutes,
+    /// Flash on timer end.
+    TimerFlash,
+    /// Bell on timer end.
+    TimerBell,
 }
 
 /// A field's value and editing behaviour.
@@ -70,7 +100,7 @@ pub struct Field {
     /// Label shown on the left.
     pub label: &'static str,
     /// Explanation shown for the selected row.
-    pub help: &'static str,
+    pub help: String,
     /// Current value.
     pub value: Value,
 }
@@ -103,28 +133,49 @@ pub struct ConfigForm {
     saved: Vec<Field>,
 }
 
-fn field(key: FieldKey, label: &'static str, help: &'static str, value: Value) -> Field {
+fn field(key: FieldKey, label: &'static str, help: impl Into<String>, value: Value) -> Field {
     Field {
         key,
         label,
-        help,
+        help: help.into(),
         value,
     }
 }
 
-fn workspace_item(w: &Workspace) -> String {
+/// Marker shown after a workspace branch that comes from the default.
+const DEFAULT_MARK: &str = " (default)";
+
+fn workspace_item(w: &Workspace, default_branch: &str) -> String {
     match &w.main_branch {
         Some(b) => format!("{} = {} @{b}", w.name, w.path.display()),
-        None => format!("{} = {}", w.name, w.path.display()),
+        None => format!(
+            "{} = {} @{default_branch}{DEFAULT_MARK}",
+            w.name,
+            w.path.display()
+        ),
     }
 }
 
-/// Parse `name = /path [@branch]`.
+/// Parse `name = /path [@branch]`; `@branch (default)` means "no own branch".
 fn parse_workspace(item: &str) -> Result<Workspace, String> {
     let (name, rest) = item
         .split_once('=')
         .ok_or_else(|| format!("workspace {item:?}: expected `name = /path [@branch]`"))?;
     let rest = rest.trim();
+    if let Some(stripped) = rest.strip_suffix(DEFAULT_MARK) {
+        let path = stripped
+            .rsplit_once(" @")
+            .map_or(stripped, |(p, _)| p)
+            .trim();
+        if path.is_empty() {
+            return Err(format!("workspace {item:?}: missing path"));
+        }
+        return Ok(Workspace {
+            name: name.trim().to_owned(),
+            path: Config::expand_tilde(path),
+            main_branch: None,
+        });
+    }
     let (path, branch) = match rest.rsplit_once(" @") {
         Some((p, b)) if !p.trim().is_empty() && !b.trim().is_empty() => {
             (p.trim(), Some(b.trim().to_owned()))
@@ -156,7 +207,7 @@ fn parse_build(item: &str) -> Result<VendorBuild, String> {
 }
 
 /// Parse `name = command ...`.
-fn parse_source(item: &str) -> Result<TaskSource, String> {
+pub fn parse_source(item: &str) -> Result<TaskSource, String> {
     let (name, command) = item
         .split_once('=')
         .ok_or_else(|| format!("task source {item:?}: expected `name = command`"))?;
@@ -186,8 +237,19 @@ impl ConfigForm {
             field(
                 FieldKey::Workspaces,
                 "Code workspaces",
-                "One per line: `name = /path/to/checkout [@main-branch]`. Attach them to tasks with Esc, a.",
-                Value::List(cfg.workspaces.iter().map(workspace_item).collect()),
+                "`name = /path/to/checkout @main-branch` — each workspace has its own main branch (edit the @part; \"(default)\" follows Default main branch; new ones are detected from git). Attach with Esc a.",
+                Value::List(
+                    cfg.workspaces
+                        .iter()
+                        .map(|w| workspace_item(w, &cfg.default_main_branch))
+                        .collect(),
+                ),
+            ),
+            field(
+                FieldKey::MainBranch,
+                "Default main branch",
+                "Main branch for workspaces marked (default).",
+                Value::Text(cfg.default_main_branch.clone()),
             ),
             field(
                 FieldKey::Builds,
@@ -198,14 +260,92 @@ impl ConfigForm {
             field(
                 FieldKey::TaskSources,
                 "Task sources",
-                "One per line: `name = command`. The command prints tickets as JSON (id,title,url,description) or TSV.",
+                "`name = /path/to/script [args]` e.g. `jira = ~/bin/jira-mine.sh`. ? shows the output format · t on a source runs it now.",
                 Value::List(cfg.task_sources.iter().map(|t| format!("{} = {}", t.name, t.command)).collect()),
             ),
             field(
-                FieldKey::MainBranch,
-                "Default main branch",
-                "Main branch for workspaces that do not set their own (`@branch`).",
-                Value::Text(cfg.default_main_branch.clone()),
+                FieldKey::GerritUrl,
+                "Gerrit URL",
+                "Web URL of your Gerrit, e.g. https://review.example.com. Empty: derived from each workspace's origin remote. Used by Esc g.",
+                Value::Text(cfg.gerrit_url.clone()),
+            ),
+            field(
+                FieldKey::AgentCommand,
+                "Agent command",
+                "One-shot AI agent for Esc i (context) and Esc b (checkpoints), e.g. claude. Empty disables. ? for details.",
+                Value::Text(cfg.agent.command.clone()),
+            ),
+            field(
+                FieldKey::AgentArgs,
+                "Agent arguments",
+                "Shell-style. {prompt} receives the prompt, else it goes to stdin. e.g. -p {prompt}",
+                Value::Text(shell_words::join(&cfg.agent.args)),
+            ),
+            field(
+                FieldKey::AgentTimeout,
+                "Agent timeout (s)",
+                "Give up on the agent after this many seconds (Esc cancels earlier).",
+                Value::Number(cfg.agent.timeout_secs.to_string()),
+            ),
+            field(
+                FieldKey::ContextWords,
+                "Context word limit",
+                "Maximum words of generated context (1-1000). Less is more.",
+                Value::Number(cfg.agent.context_max_words.to_string()),
+            ),
+            field(
+                FieldKey::ContextPrompt,
+                "Context prompt file",
+                "Template for Esc i. Empty: prompts/context.md next to the config file. Esc E in a task edits it.",
+                Value::Text(cfg.agent.context_prompt.display().to_string()),
+            ),
+            field(
+                FieldKey::CheckpointPrompt,
+                "Checkpoint prompt file",
+                "Template for Esc b. Empty: prompts/checkpoints.md next to the config file.",
+                Value::Text(cfg.agent.checkpoint_prompt.display().to_string()),
+            ),
+            field(
+                FieldKey::CodingCommand,
+                "Coding agent command",
+                "Interactive agent started in a new task shell by leader a / Esc l, e.g. claude, codex, aider. Empty disables.",
+                Value::Text(cfg.coding_agent.command.clone()),
+            ),
+            field(
+                FieldKey::CodingArgs,
+                "Coding agent arguments",
+                "Shell-style. {prompt} receives the startup prompt, else it is appended as the last argument.",
+                Value::Text(shell_words::join(&cfg.coding_agent.args)),
+            ),
+            field(
+                FieldKey::CodingPrompt,
+                "Coding agent prompt file",
+                "Startup prompt template. Empty: prompts/coding-agent.md next to the config file.",
+                Value::Text(cfg.coding_agent.startup_prompt.display().to_string()),
+            ),
+            field(
+                FieldKey::CodingStartInCode,
+                "Coding agent in code dir",
+                "Start the coding agent in the first attached code workspace (off: the task folder).",
+                Value::Toggle(cfg.coding_agent.start_in_code),
+            ),
+            field(
+                FieldKey::FocusMinutes,
+                "Focus block (min)",
+                "Timer length for tasks without checkpoints.",
+                Value::Number(cfg.timer.focus_minutes.to_string()),
+            ),
+            field(
+                FieldKey::TimerFlash,
+                "Flash when time is up",
+                "Flash the whole screen when a checkpoint's time runs out.",
+                Value::Toggle(cfg.timer.flash),
+            ),
+            field(
+                FieldKey::TimerBell,
+                "Bell when time is up",
+                "Ring the terminal bell (many terminals turn it into a notification).",
+                Value::Toggle(cfg.timer.bell),
             ),
             field(
                 FieldKey::ColorScheme,
@@ -339,6 +479,19 @@ impl ConfigForm {
     pub fn selected_field(&self) -> usize {
         match self.selected_row() {
             Row::Field(f) | Row::Add(f) | Row::Item { field: f, .. } => f,
+        }
+    }
+
+    /// The text of the selected list item, when it belongs to field `key`.
+    pub fn selected_item(&self, key: FieldKey) -> Option<String> {
+        match self.selected_row() {
+            Row::Item { field, item } if self.fields[field].key == key => {
+                match &self.fields[field].value {
+                    Value::List(items) => items.get(item).cloned(),
+                    _ => None,
+                }
+            }
+            _ => None,
         }
     }
 
@@ -504,6 +657,11 @@ impl ConfigForm {
             }
             Row::Add(fi) => {
                 if !value.trim().is_empty() {
+                    let value = if self.fields[fi].key == FieldKey::Workspaces {
+                        with_detected_branch(value)
+                    } else {
+                        value
+                    };
                     if let Value::List(items) = &mut self.fields[fi].value {
                         items.push(value);
                     }
@@ -654,10 +812,76 @@ impl ConfigForm {
                 (FieldKey::ContextFile, Value::Text(v)) => {
                     v.trim().clone_into(&mut cfg.context_file);
                 }
+                (FieldKey::GerritUrl, Value::Text(v)) => v.trim().clone_into(&mut cfg.gerrit_url),
+                (FieldKey::AgentCommand, Value::Text(v)) => {
+                    v.trim().clone_into(&mut cfg.agent.command);
+                }
+                (FieldKey::AgentArgs, Value::Text(v)) => match shell_words::split(v) {
+                    Ok(a) => cfg.agent.args = a,
+                    Err(e) => errors.push(format!("agent arguments: {e}")),
+                },
+                (FieldKey::AgentTimeout, Value::Number(v)) => match v.trim().parse() {
+                    Ok(n) => cfg.agent.timeout_secs = n,
+                    Err(_) => errors.push(format!("agent timeout must be a number, got {v:?}")),
+                },
+                (FieldKey::ContextWords, Value::Number(v)) => match v.trim().parse() {
+                    Ok(n) => cfg.agent.context_max_words = n,
+                    Err(_) => {
+                        errors.push(format!("context word limit must be a number, got {v:?}"));
+                    }
+                },
+                (FieldKey::ContextPrompt, Value::Text(v)) => {
+                    cfg.agent.context_prompt = path_or_empty(v);
+                }
+                (FieldKey::CheckpointPrompt, Value::Text(v)) => {
+                    cfg.agent.checkpoint_prompt = path_or_empty(v);
+                }
+                (FieldKey::CodingCommand, Value::Text(v)) => {
+                    v.trim().clone_into(&mut cfg.coding_agent.command);
+                }
+                (FieldKey::CodingArgs, Value::Text(v)) => match shell_words::split(v) {
+                    Ok(a) => cfg.coding_agent.args = a,
+                    Err(e) => errors.push(format!("coding agent arguments: {e}")),
+                },
+                (FieldKey::CodingPrompt, Value::Text(v)) => {
+                    cfg.coding_agent.startup_prompt = path_or_empty(v);
+                }
+                (FieldKey::CodingStartInCode, Value::Toggle(b)) => {
+                    cfg.coding_agent.start_in_code = *b;
+                }
+                (FieldKey::FocusMinutes, Value::Number(v)) => match v.trim().parse() {
+                    Ok(n) => cfg.timer.focus_minutes = n,
+                    Err(_) => errors.push(format!("focus block must be a number, got {v:?}")),
+                },
+                (FieldKey::TimerFlash, Value::Toggle(b)) => cfg.timer.flash = *b,
+                (FieldKey::TimerBell, Value::Toggle(b)) => cfg.timer.bell = *b,
                 _ => {}
             }
         }
         (cfg, errors)
+    }
+}
+
+fn path_or_empty(v: &str) -> PathBuf {
+    let v = v.trim();
+    if v.is_empty() {
+        PathBuf::new()
+    } else {
+        Config::expand_tilde(v)
+    }
+}
+
+/// A new `name = /path` workspace without `@branch` gets the branch git reports.
+fn with_detected_branch(item: String) -> String {
+    let Ok(w) = parse_workspace(&item) else {
+        return item;
+    };
+    if w.main_branch.is_some() || item.contains(" @") {
+        return item;
+    }
+    match crate::git::detect_main_branch(&w.path) {
+        Some(b) => format!("{} @{b}", item.trim_end()),
+        None => item,
     }
 }
 
@@ -776,9 +1000,59 @@ mod tests {
             ws.value,
             Value::List(vec![
                 "fw = /src/fw @develop".into(),
-                format!("app = {}", cfg.workspaces[1].path.display())
+                format!("app = {} @main (default)", cfg.workspaces[1].path.display())
             ])
         );
+        // "(default)" parses back to "no own branch".
+        let (again_cfg, errors) = again.to_config(&cfg);
+        assert!(errors.is_empty(), "{errors:?}");
+        assert_eq!(again_cfg.workspaces, cfg.workspaces);
+    }
+
+    #[test]
+    fn new_workspace_gets_detected_main_branch_and_agent_fields_parse() {
+        let repo = tempfile::tempdir().unwrap();
+        let git = |args: &[&str]| {
+            assert!(std::process::Command::new("git")
+                .arg("-C")
+                .arg(repo.path())
+                .args(args)
+                .output()
+                .unwrap()
+                .status
+                .success());
+        };
+        git(&["init", "-q", "-b", "develop"]);
+        git(&[
+            "-c",
+            "user.email=t@x",
+            "-c",
+            "user.name=t",
+            "commit",
+            "-q",
+            "--allow-empty",
+            "-m",
+            "i",
+        ]);
+        let base = Config::default();
+        let mut form = ConfigForm::new(&base, false);
+        goto(&mut form, FieldKey::Workspaces);
+        form.handle_nav_key(key(KeyCode::Char('a')));
+        form.paste(&format!("fw = {}", repo.path().display()));
+        form.handle_edit_key(key(KeyCode::Enter));
+        let (cfg, _) = form.to_config(&base);
+        assert_eq!(cfg.workspaces[0].main_branch.as_deref(), Some("develop"));
+
+        goto(&mut form, FieldKey::AgentArgs);
+        form.handle_nav_key(key(KeyCode::Enter));
+        form.handle_edit_key(KeyEvent::new(KeyCode::Char('u'), KeyModifiers::CONTROL));
+        form.paste("--model 'big one' -p {prompt}");
+        form.handle_edit_key(key(KeyCode::Enter));
+        let (cfg, errors) = form.to_config(&base);
+        assert!(errors.is_empty(), "{errors:?}");
+        assert_eq!(cfg.agent.args, vec!["--model", "big one", "-p", "{prompt}"]);
+        goto(&mut form, FieldKey::TaskSources);
+        assert!(form.selected_item(FieldKey::TaskSources).is_none());
     }
 
     #[test]

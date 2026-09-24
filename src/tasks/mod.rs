@@ -20,11 +20,15 @@
 //! git and matches the file the user already maintains by hand.
 
 pub mod board;
+pub mod checkpoints;
 pub mod context;
+pub mod record;
+pub mod sections;
 pub mod sources;
 pub mod store;
 
 pub use board::Board;
-pub use context::TaskMeta;
+pub use checkpoints::Checkpoint;
+pub use context::{GerritRef, TaskMeta};
 pub use sources::Ticket;
 pub use store::{TaskStore, TaskSummary};
