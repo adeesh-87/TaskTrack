@@ -219,8 +219,19 @@ impl App {
                      FILES\n  Enter open/toggle · ←/→ collapse/expand · a new file · A new folder · r rename\n  \
                      d delete · . hidden · t shell · R refresh (the tree also refreshes by itself)\n\n\
                      EDITOR\n  Ctrl+S save · Ctrl+W close · Ctrl+Z undo · Ctrl+Y redo · Ctrl+F find · F3/Ctrl+G next\n  \
+                     Shift+arrows/Home/End/PgUp/PgDn select · Ctrl+←/→ (Alt+←/→, Alt+B/F) by word, +Shift selects\n  \
+                     Ctrl+Home/End file start/end · Ctrl+A select all\n  \
+                     Ctrl+C copy · Ctrl+X cut · Ctrl+V paste (nothing selected: copy/cut the line)\n  \
+                     Ctrl+Backspace (Ctrl+H, Alt+Backspace) / Ctrl+Delete (Alt+D) delete a word\n  \
+                     Mouse: drag selects · double-click word · triple-click line\n  \
+                     Typing replaces the selection. In the editor Ctrl+C copies: quit with Esc q.\n  \
+                     Copies reach the system clipboard via OSC 52 (tmux: set -g set-clipboard on),\n  \
+                     or via the Copy command setting (wl-copy, xclip -selection clipboard, pbcopy).\n  \
+                     Ctrl+V pastes the last copy, or the Paste command's output (wl-paste -n, pbpaste).\n  \
+                     Your terminal's own paste (Ctrl+Shift+V, Cmd+V) also works.\n  \
                      Long Markdown and text lines wrap (setting: Soft wrap).\n\n\
-                     TERMINAL\n  all keys go to the shell · Shift+PgUp/PgDn scroll · mouse goes to programs that ask\n",
+                     TERMINAL\n  all keys go to the shell · Shift+PgUp/PgDn scroll · mouse goes to programs that ask\n  \
+                     Shift+drag selects with your terminal emulator (in every pane)\n",
                 );
             }
             HelpTopic::Work => {

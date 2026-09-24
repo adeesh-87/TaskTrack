@@ -40,6 +40,26 @@ pub struct Buffer {
     last_edit: Option<EditKind>,
     /// Inside `insert_str`: the whole paste is one undo step.
     batching: bool,
+    /// Selection anchor: the selection runs from here to the cursor.
+    anchor: Option<(usize, usize)>,
+}
+
+/// Character classes for word-wise movement.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum CharClass {
+    Space,
+    Word,
+    Punct,
+}
+
+fn class_of(c: char) -> CharClass {
+    if c.is_whitespace() {
+        CharClass::Space
+    } else if c.is_alphanumeric() || c == '_' {
+        CharClass::Word
+    } else {
+        CharClass::Punct
+    }
 }
 
 impl Buffer {
@@ -72,6 +92,7 @@ impl Buffer {
             redo: Vec::new(),
             last_edit: None,
             batching: false,
+            anchor: None,
         }
     }
 
@@ -92,6 +113,7 @@ impl Buffer {
         text.clone_into(&mut self.base);
         self.dirty = false;
         self.revision += 1;
+        self.anchor = None;
         self.set_cursor(self.cursor.0, self.cursor.1);
     }
 
@@ -120,6 +142,7 @@ impl Buffer {
         self.revision += 1;
         self.dirty = self.text().trim_end_matches('\n') != self.base.trim_end_matches('\n');
         self.last_edit = None;
+        self.anchor = None;
     }
 
     /// Undo the last edit. Returns whether there was one.
@@ -155,6 +178,7 @@ impl Buffer {
         if needle.is_empty() {
             return false;
         }
+        self.anchor = None;
         let n = self.lines.len();
         let (row, col) = self.cursor;
         for step in 0..=n {
@@ -232,6 +256,216 @@ impl Buffer {
     pub fn set_cursor(&mut self, row: usize, col: usize) {
         self.cursor.0 = row.min(self.lines.len() - 1);
         self.cursor.1 = col.min(self.line_len(self.cursor.0));
+    }
+
+    /// Start extending a selection from the cursor (`extend`), or drop the
+    /// selection. Call before a movement: Shift+arrow is `select(true)` + move.
+    pub fn select(&mut self, extend: bool) {
+        if !extend {
+            self.anchor = None;
+        } else if self.anchor.is_none() {
+            self.anchor = Some(self.cursor);
+        }
+    }
+
+    /// Put the selection anchor at the cursor (a mouse press: dragging extends it).
+    pub fn set_anchor(&mut self) {
+        self.anchor = Some(self.cursor);
+    }
+
+    /// Select `start..end` (char positions), leaving the cursor at `end`.
+    pub fn select_range(&mut self, start: (usize, usize), end: (usize, usize)) {
+        self.set_cursor(start.0, start.1);
+        self.anchor = Some(self.cursor);
+        self.set_cursor(end.0, end.1);
+    }
+
+    /// Select the whole buffer.
+    pub fn select_all(&mut self) {
+        let last = self.lines.len() - 1;
+        self.select_range((0, 0), (last, self.line_len(last)));
+    }
+
+    /// Select the word (or run of spaces / punctuation) under the cursor.
+    pub fn select_word(&mut self) {
+        let (row, col) = self.cursor;
+        let chars: Vec<char> = self.lines[row].chars().collect();
+        let Some(&c) = chars.get(col).or_else(|| chars.get(col.wrapping_sub(1))) else {
+            return;
+        };
+        let class = class_of(c);
+        let at = col.min(chars.len() - 1);
+        let mut start = at;
+        while start > 0 && class_of(chars[start - 1]) == class {
+            start -= 1;
+        }
+        let mut end = at;
+        while end < chars.len() && class_of(chars[end]) == class {
+            end += 1;
+        }
+        self.select_range((row, start), (row, end));
+    }
+
+    /// Select the cursor's whole line, including its line break.
+    pub fn select_line(&mut self) {
+        let row = self.cursor.0;
+        if row + 1 < self.lines.len() {
+            self.select_range((row, 0), (row + 1, 0));
+        } else {
+            self.select_range((row, 0), (row, self.line_len(row)));
+        }
+    }
+
+    /// The selection as ordered (start, end) char positions; `None` when empty.
+    pub fn selection(&self) -> Option<((usize, usize), (usize, usize))> {
+        let anchor = self.anchor?;
+        let row = anchor.0.min(self.lines.len() - 1);
+        let anchor = (row, anchor.1.min(self.line_len(row)));
+        match anchor.cmp(&self.cursor) {
+            std::cmp::Ordering::Less => Some((anchor, self.cursor)),
+            std::cmp::Ordering::Greater => Some((self.cursor, anchor)),
+            std::cmp::Ordering::Equal => None,
+        }
+    }
+
+    /// Text in `start..end` (char positions), lines joined with `\n`.
+    fn text_between(&self, start: (usize, usize), end: (usize, usize)) -> String {
+        if start.0 == end.0 {
+            return self.lines[start.0]
+                .chars()
+                .skip(start.1)
+                .take(end.1 - start.1)
+                .collect();
+        }
+        let mut out: String = self.lines[start.0].chars().skip(start.1).collect();
+        for line in &self.lines[start.0 + 1..end.0] {
+            out.push('\n');
+            out.push_str(line);
+        }
+        out.push('\n');
+        out.extend(self.lines[end.0].chars().take(end.1));
+        out
+    }
+
+    /// The selected text, if any.
+    pub fn selected_text(&self) -> Option<String> {
+        self.selection().map(|(a, b)| self.text_between(a, b))
+    }
+
+    /// Remove `start..end` and put the cursor at `start` (no undo step).
+    fn remove_range(&mut self, start: (usize, usize), end: (usize, usize)) {
+        let tail_idx = Self::byte_index(&self.lines[end.0], end.1);
+        let tail = self.lines[end.0][tail_idx..].to_owned();
+        let head_idx = Self::byte_index(&self.lines[start.0], start.1);
+        self.lines[start.0].truncate(head_idx);
+        self.lines[start.0].push_str(&tail);
+        self.lines.drain(start.0 + 1..=end.0);
+        self.cursor = start;
+        self.anchor = None;
+        self.dirty = true;
+        self.revision += 1;
+    }
+
+    /// Delete the selection as one undo step. Returns whether there was one.
+    /// Always drops the anchor.
+    fn delete_selection_step(&mut self) -> bool {
+        let Some((a, b)) = self.selection() else {
+            self.anchor = None;
+            return false;
+        };
+        self.push_undo(EditKind::Other);
+        self.remove_range(a, b);
+        true
+    }
+
+    /// Cut: return the selected text and delete it.
+    pub fn cut(&mut self) -> Option<String> {
+        let text = self.selected_text()?;
+        if self.read_only {
+            return None;
+        }
+        self.delete_selection_step();
+        Some(text)
+    }
+
+    /// Position one word to the left of `pos` (crossing to the previous line end).
+    fn word_left_of(&self, (row, col): (usize, usize)) -> (usize, usize) {
+        if col == 0 {
+            return if row > 0 {
+                (row - 1, self.line_len(row - 1))
+            } else {
+                (0, 0)
+            };
+        }
+        let chars: Vec<char> = self.lines[row].chars().collect();
+        let mut i = col.min(chars.len());
+        while i > 0 && class_of(chars[i - 1]) == CharClass::Space {
+            i -= 1;
+        }
+        if i > 0 {
+            let class = class_of(chars[i - 1]);
+            while i > 0 && class_of(chars[i - 1]) == class {
+                i -= 1;
+            }
+        }
+        (row, i)
+    }
+
+    /// Position one word to the right of `pos` (crossing to the next line start).
+    fn word_right_of(&self, (row, col): (usize, usize)) -> (usize, usize) {
+        let chars: Vec<char> = self.lines[row].chars().collect();
+        if col >= chars.len() {
+            return if row + 1 < self.lines.len() {
+                (row + 1, 0)
+            } else {
+                (row, chars.len())
+            };
+        }
+        let mut i = col;
+        let class = class_of(chars[i]);
+        if class != CharClass::Space {
+            while i < chars.len() && class_of(chars[i]) == class {
+                i += 1;
+            }
+        }
+        while i < chars.len() && class_of(chars[i]) == CharClass::Space {
+            i += 1;
+        }
+        (row, i)
+    }
+
+    /// Move the cursor to the start of the previous word.
+    pub fn word_left(&mut self) {
+        self.cursor = self.word_left_of(self.cursor);
+    }
+
+    /// Move the cursor to the start of the next word.
+    pub fn word_right(&mut self) {
+        self.cursor = self.word_right_of(self.cursor);
+    }
+
+    /// Delete from the previous word start to the cursor (or the selection).
+    pub fn delete_word_left(&mut self) {
+        if self.read_only || self.delete_selection_step() {
+            return;
+        }
+        let start = self.word_left_of(self.cursor);
+        if start != self.cursor {
+            self.push_undo(EditKind::Other);
+            self.remove_range(start, self.cursor);
+        }
+    }
+
+    /// Delete from the cursor to the next word start (or the selection).
+    pub fn delete_word_right(&mut self) {
+        if self.read_only || self.delete_selection_step() {
+            return;
+        }
+        let end = self.word_right_of(self.cursor);
+        if end != self.cursor {
+            self.push_undo(EditKind::Other);
+            self.remove_range(self.cursor, end);
+        }
     }
 
     /// Scroll the viewport by `delta` lines, dragging the cursor along so it stays visible.
@@ -370,11 +604,17 @@ impl Buffer {
         if self.read_only {
             return;
         }
-        self.push_undo(if c.is_whitespace() {
+        let kind = if c.is_whitespace() {
             EditKind::Other
         } else {
             EditKind::Type
-        });
+        };
+        if self.delete_selection_step() {
+            // Typing over a selection undoes together with the deletion.
+            self.last_edit = Some(kind);
+        } else {
+            self.push_undo(kind);
+        }
         let (row, col) = self.cursor;
         let line = &mut self.lines[row];
         let idx = Self::byte_index(line, col);
@@ -391,6 +631,7 @@ impl Buffer {
         }
         self.push_undo(EditKind::Other);
         self.batching = true;
+        self.delete_selection_step();
         for c in s.chars() {
             match c {
                 '\n' => self.insert_newline(),
@@ -407,7 +648,9 @@ impl Buffer {
         if self.read_only {
             return;
         }
-        self.push_undo(EditKind::Other);
+        if !self.delete_selection_step() {
+            self.push_undo(EditKind::Other);
+        }
         let (row, col) = self.cursor;
         let idx = Self::byte_index(&self.lines[row], col);
         let rest = self.lines[row].split_off(idx);
@@ -419,7 +662,7 @@ impl Buffer {
 
     /// Delete the character before the cursor (joining lines at column 0).
     pub fn backspace(&mut self) {
-        if self.read_only || self.cursor == (0, 0) {
+        if self.read_only || self.delete_selection_step() || self.cursor == (0, 0) {
             return;
         }
         self.push_undo(EditKind::Other);
@@ -442,7 +685,7 @@ impl Buffer {
 
     /// Delete the character under the cursor (joining lines at the end).
     pub fn delete(&mut self) {
-        if self.read_only {
+        if self.read_only || self.delete_selection_step() {
             return;
         }
         self.push_undo(EditKind::Other);
@@ -703,6 +946,104 @@ mod tests {
         assert!(!b.is_dirty());
         assert_eq!(b.base_text(), "a\nbx\nc\n");
         assert_eq!(b.cursor(), (1, 2));
+    }
+
+    #[test]
+    fn word_movement_skips_words_spaces_and_punctuation() {
+        let mut b = buf("let foo_bar = x.len();\nnext");
+        b.word_right();
+        assert_eq!(b.cursor(), (0, 4));
+        b.word_right();
+        assert_eq!(b.cursor(), (0, 12));
+        b.word_right();
+        assert_eq!(b.cursor(), (0, 14));
+        b.word_right();
+        assert_eq!(b.cursor(), (0, 15));
+        b.end();
+        b.word_right();
+        assert_eq!(b.cursor(), (1, 0), "line end crosses to the next line");
+        b.word_left();
+        assert_eq!(b.cursor(), (0, 22));
+        b.word_left();
+        assert_eq!(b.cursor(), (0, 19));
+        b.set_cursor(0, 7);
+        b.word_left();
+        assert_eq!(b.cursor(), (0, 4));
+        b.word_left();
+        b.word_left();
+        assert_eq!(b.cursor(), (0, 0));
+    }
+
+    #[test]
+    fn selection_extends_copies_and_is_replaced_by_typing() {
+        let mut b = buf("hello world\nsecond line");
+        b.select(true);
+        b.word_right();
+        assert_eq!(b.selected_text().as_deref(), Some("hello "));
+        b.select(true);
+        b.move_down();
+        assert_eq!(b.selected_text().as_deref(), Some("hello world\nsecond"));
+        b.select(false);
+        assert_eq!(b.selection(), None);
+
+        b.select_range((0, 6), (0, 11));
+        b.insert_char('W');
+        b.insert_char('!');
+        assert_eq!(b.lines()[0], "hello W!");
+        assert!(b.undo(), "typing over a selection is one undo step");
+        assert_eq!(b.text(), "hello world\nsecond line");
+
+        // A backwards selection (anchor after the cursor) works the same.
+        b.set_cursor(1, 6);
+        b.select(true);
+        b.move_up();
+        b.home();
+        assert_eq!(b.selected_text().as_deref(), Some("hello world\nsecond"));
+        b.backspace();
+        assert_eq!(b.text(), " line");
+        assert_eq!(b.cursor(), (0, 0));
+    }
+
+    #[test]
+    fn cut_paste_select_all_and_word_deletes() {
+        let mut b = buf("one two\nthree");
+        b.select_all();
+        assert_eq!(b.selected_text().as_deref(), Some("one two\nthree"));
+        assert_eq!(b.cut().as_deref(), Some("one two\nthree"));
+        assert_eq!(b.text(), "");
+        b.insert_str("alpha beta\ngamma");
+        b.select_range((0, 2), (1, 2));
+        b.insert_str("XY");
+        assert_eq!(b.text(), "alXYmma");
+        assert!(b.undo());
+        assert_eq!(b.text(), "alpha beta\ngamma");
+
+        b.set_cursor(0, 10);
+        b.delete_word_left();
+        assert_eq!(b.lines()[0], "alpha ");
+        b.home();
+        b.delete_word_right();
+        assert_eq!(b.lines()[0], "");
+        b.delete_word_right();
+        assert_eq!(b.text(), "gamma", "at a line end the line break goes");
+
+        b.set_cursor(0, 2);
+        b.select_word();
+        assert_eq!(b.selected_text().as_deref(), Some("gamma"));
+        b.select_line();
+        assert_eq!(b.selected_text().as_deref(), Some("gamma"));
+        assert_eq!(b.cut(), Some("gamma".into()));
+        assert_eq!(b.cut(), None, "nothing selected");
+    }
+
+    #[test]
+    fn read_only_selection_copies_but_does_not_cut() {
+        let mut b = Buffer::from_text(Path::new("/tmp/x"), "keep me", true);
+        b.select_all();
+        assert_eq!(b.selected_text().as_deref(), Some("keep me"));
+        assert_eq!(b.cut(), None);
+        b.delete_word_left();
+        assert_eq!(b.text(), "keep me");
     }
 
     #[test]

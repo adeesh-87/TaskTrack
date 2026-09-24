@@ -14,6 +14,7 @@ pub mod timer;
 pub mod ui_state;
 
 mod agent;
+mod clipboard;
 mod gerrit;
 mod help;
 mod hooks;
@@ -118,6 +119,14 @@ pub struct App {
     timer: Option<timer::Timer>,
     flash_start: Option<Instant>,
     bell: bool,
+    /// Last text copied in the editor.
+    clipboard: String,
+    /// Escape sequences for the real terminal (OSC 52), written after a frame.
+    terminal_out: Vec<u8>,
+    /// A left-button drag that started in the editor (keeps selecting outside it).
+    editor_drag: bool,
+    /// Clicks in a row on the same cell: 1 cursor, 2 word, 3 line.
+    click_count: u8,
     /// Cancels the running agent job (Esc in its log popup).
     job_cancel: Option<Arc<AtomicBool>>,
     next_up: Vec<TaskRecord>,
@@ -189,6 +198,10 @@ impl App {
             timer: None,
             flash_start: None,
             bell: false,
+            clipboard: String::new(),
+            terminal_out: Vec::new(),
+            editor_drag: false,
+            click_count: 0,
             job_cancel: None,
             next_up: Vec::new(),
             records: HashMap::new(),
@@ -551,7 +564,7 @@ impl App {
             | K::CodingStartInCode => HelpTopic::Agents,
             K::Hooks | K::HookTimeout => HelpTopic::Hooks,
             K::GerritUrl | K::GerritStatus => HelpTopic::Gerrit,
-            K::Keys | K::LeaderKey => HelpTopic::Keys,
+            K::Keys | K::LeaderKey | K::CopyCommand | K::PasteCommand => HelpTopic::Keys,
             K::FocusMinutes | K::TimerFlash | K::TimerBell | K::IdleMinutes | K::ArchiveDays => {
                 HelpTopic::Work
             }
@@ -1610,7 +1623,8 @@ impl App {
                 self.open_palette();
                 return;
             }
-            (KeyCode::Char('c'), KeyModifiers::CONTROL) => {
+            // In the editor Ctrl+C copies; quit from there with Esc q.
+            (KeyCode::Char('c'), KeyModifiers::CONTROL) if focus != Focus::Editor => {
                 self.request_quit();
                 return;
             }
@@ -1926,6 +1940,13 @@ impl App {
 
     fn handle_editor_key(&mut self, key: KeyEvent) {
         let height = self.editor_height;
+        let ctrl = key.modifiers.contains(KeyModifiers::CONTROL);
+        let alt = key.modifiers.contains(KeyModifiers::ALT);
+        let shift = key.modifiers.contains(KeyModifiers::SHIFT);
+        if ctrl && !alt && matches!(key.code, KeyCode::Char('v' | 'V')) {
+            self.paste_clipboard();
+            return;
+        }
         let Some(ctx) = self.active_context_mut() else {
             return;
         };
@@ -1934,7 +1955,28 @@ impl App {
             return;
         };
         let mut next = Next::None;
+        let mut copied = None;
         match (key.code, key.modifiers) {
+            (
+                KeyCode::Left
+                | KeyCode::Right
+                | KeyCode::Up
+                | KeyCode::Down
+                | KeyCode::Home
+                | KeyCode::End
+                | KeyCode::PageUp
+                | KeyCode::PageDown,
+                _,
+            ) => move_in_editor(ed, key.code, ctrl || alt, shift, height),
+            // Option+←/→ on macOS terminals arrives as Alt+b / Alt+f.
+            (KeyCode::Char('b'), KeyModifiers::ALT) => {
+                ed.select(false);
+                ed.word_left();
+            }
+            (KeyCode::Char('f'), KeyModifiers::ALT) => {
+                ed.select(false);
+                ed.word_right();
+            }
             (KeyCode::Char('s'), KeyModifiers::CONTROL) => next = Next::Action(Action::Save),
             (KeyCode::Char('w'), KeyModifiers::CONTROL)
             | (KeyCode::Char('q'), KeyModifiers::CONTROL) => {
@@ -1953,16 +1995,37 @@ impl App {
             (KeyCode::Char('Z'), m) if m.contains(KeyModifiers::CONTROL) => {
                 ed.redo();
             }
-            (KeyCode::Left, _) => ed.move_left(),
-            (KeyCode::Right, _) => ed.move_right(),
-            (KeyCode::Up, _) => ed.move_up(),
-            (KeyCode::Down, _) => ed.move_down(),
-            (KeyCode::Home, KeyModifiers::CONTROL) => ed.top(),
-            (KeyCode::End, KeyModifiers::CONTROL) => ed.bottom(),
-            (KeyCode::Home, _) => ed.home(),
-            (KeyCode::End, _) => ed.end(),
-            (KeyCode::PageUp, _) => ed.page_up(height),
-            (KeyCode::PageDown, _) => ed.page_down(height),
+            (KeyCode::Char('a'), KeyModifiers::CONTROL) => ed.select_all(),
+            // Copy / cut the selection, or the whole line when nothing is selected.
+            (KeyCode::Char('c'), KeyModifiers::CONTROL) => {
+                if ed.selection().is_none() {
+                    ed.select_line();
+                    copied = ed.selected_text();
+                    ed.select(false);
+                } else {
+                    copied = ed.selected_text();
+                }
+            }
+            (KeyCode::Char('x'), KeyModifiers::CONTROL) => {
+                if ed.selection().is_none() {
+                    ed.select_line();
+                }
+                if ed.is_read_only() {
+                    copied = ed.selected_text();
+                    ed.select(false);
+                } else {
+                    copied = ed.cut();
+                }
+            }
+            // Ctrl+Backspace arrives as Ctrl+H in most terminals.
+            (KeyCode::Backspace, m) if m.intersects(KeyModifiers::CONTROL | KeyModifiers::ALT) => {
+                ed.delete_word_left();
+            }
+            (KeyCode::Char('h'), KeyModifiers::CONTROL) => ed.delete_word_left(),
+            (KeyCode::Delete, m) if m.intersects(KeyModifiers::CONTROL | KeyModifiers::ALT) => {
+                ed.delete_word_right();
+            }
+            (KeyCode::Char('d'), KeyModifiers::ALT) => ed.delete_word_right(),
             (KeyCode::Enter, _) => ed.insert_newline(),
             (KeyCode::Backspace, _) => ed.backspace(),
             (KeyCode::Delete, _) => ed.delete(),
@@ -1977,7 +2040,27 @@ impl App {
         if let Some(ed) = &mut ctx.editor {
             ed.ensure_visible(height);
         }
+        if let Some(text) = copied {
+            self.copy_to_clipboard(text);
+        }
         self.apply_next(next);
+    }
+
+    /// Ctrl+V in the editor.
+    fn paste_clipboard(&mut self) {
+        match self.clipboard_text() {
+            Ok(text) if text.is_empty() => self.set_status(
+                "nothing to paste: copy with Ctrl+C first, set a paste command, or use your terminal's paste",
+            ),
+            Ok(text) => {
+                let height = self.editor_height;
+                if let Some(ed) = self.active_context_mut().and_then(|c| c.editor.as_mut()) {
+                    ed.insert_str(&text);
+                    ed.ensure_visible(height);
+                }
+            }
+            Err(e) => self.set_status(e),
+        }
     }
 
     fn handle_shell_list_key(&mut self, key: KeyEvent) {
@@ -2790,6 +2873,44 @@ pub fn human_size(bytes: u64) -> String {
         format!("{bytes} B")
     } else {
         format!("{size:.1} {}", UNITS[unit])
+    }
+}
+
+/// Arrow / Home / End / Page keys in the editor: Shift extends the selection,
+/// `word` (Ctrl or Alt) moves by word, Ctrl+Home/End go to the ends.
+fn move_in_editor(ed: &mut Buffer, code: KeyCode, word: bool, shift: bool, height: usize) {
+    // ← / → without Shift collapse a selection to its start / end.
+    if !shift && !word {
+        if let Some((start, end)) = ed.selection() {
+            match code {
+                KeyCode::Left => {
+                    ed.select(false);
+                    ed.set_cursor(start.0, start.1);
+                    return;
+                }
+                KeyCode::Right => {
+                    ed.select(false);
+                    ed.set_cursor(end.0, end.1);
+                    return;
+                }
+                _ => {}
+            }
+        }
+    }
+    ed.select(shift);
+    match code {
+        KeyCode::Left if word => ed.word_left(),
+        KeyCode::Right if word => ed.word_right(),
+        KeyCode::Left => ed.move_left(),
+        KeyCode::Right => ed.move_right(),
+        KeyCode::Up => ed.move_up(),
+        KeyCode::Down => ed.move_down(),
+        KeyCode::Home if word => ed.top(),
+        KeyCode::End if word => ed.bottom(),
+        KeyCode::Home => ed.home(),
+        KeyCode::End => ed.end(),
+        KeyCode::PageUp => ed.page_up(height),
+        _ => ed.page_down(height),
     }
 }
 

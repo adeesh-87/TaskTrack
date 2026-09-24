@@ -133,11 +133,40 @@ shells that are already open.
 
 The mouse works everywhere: click a pane to focus it, click a task, file or
 shell to select it, double-click to open, wheel to scroll lists, the editor
-and the terminal's scrollback, click in the editor to place the cursor.
-Programs that ask for mouse reporting (vim, less, agent CLIs) get the events
-forwarded in the encoding they requested. Hold **Shift** while dragging to
-select text with your terminal emulator as usual. `mouse = false` in the
-config turns capture off.
+and the terminal's scrollback. In the editor, click places the cursor, drag
+selects (past the pane edge it scrolls), double-click selects a word and
+triple-click a line. Programs that ask for mouse reporting (vim, less, agent
+CLIs) get the events forwarded in the encoding they requested. In shells and
+elsewhere, hold **Shift** while dragging to select with your terminal
+emulator as usual. `mouse = false` in the config turns capture off.
+
+### Editing
+
+| keys | what |
+| ---- | ---- |
+| `Shift` + arrows / `Home` / `End` / `PgUp` / `PgDn` | select |
+| `Ctrl+←/→` (`Alt+←/→`, `Alt+B`/`Alt+F`) | move by word; add `Shift` to select |
+| `Ctrl+Home` / `Ctrl+End` | start / end of the file |
+| `Ctrl+A` | select all |
+| `Ctrl+C` / `Ctrl+X` | copy / cut the selection (nothing selected: the whole line) |
+| `Ctrl+V` | paste |
+| `Ctrl+Backspace` (`Ctrl+H`, `Alt+Backspace`) / `Ctrl+Delete` (`Alt+D`) | delete a word back / forward |
+| `Ctrl+Z` / `Ctrl+Y` | undo / redo |
+| `Ctrl+F`, `F3` / `Ctrl+G` | find, next match |
+| `Ctrl+S` / `Ctrl+W` | save / close |
+
+Typing, `Enter`, `Backspace` or a paste replace the selection. In the editor
+`Ctrl+C` copies; quit with `Esc` `q`.
+
+**Clipboard.** Copied text goes to your system clipboard through OSC 52,
+which most terminals support (kitty, WezTerm, Alacritty, foot, iTerm2,
+Windows Terminal, xterm with `allowWindowOps`; inside tmux set
+`set -g set-clipboard on`). If yours does not (e.g. GNOME Terminal), set
+`copy_command` (`wl-copy`, `xclip -selection clipboard`, `pbcopy`).
+`Ctrl+V` pastes what you copied in pahiri, or the output of `paste_command`
+(`wl-paste -n`, `xclip -o -selection clipboard`, `pbpaste`) when it is set.
+Your terminal's own paste (`Ctrl+Shift+V`, `Cmd+V`, middle click) always works
+too.
 
 ### Syntax highlighting
 
@@ -400,6 +429,8 @@ Config: `~/.config/pahiri/config.toml`. Logs and generated shell files:
 | `keys` | {} | `"palette.timer" = "u"`, `"leader.coding_agent" = "A"` — names on the help page |
 | `archive_after_days` | 14 | hide finished tasks older than this (0: never) |
 | `soft_wrap` | true | wrap Markdown and text in the editor |
+| `copy_command` | "" | gets copied text on stdin (`wl-copy`, `pbcopy`); empty: OSC 52 |
+| `paste_command` | "" | `Ctrl+V` pastes its output (`wl-paste -n`, `pbpaste`); empty: pahiri's last copy |
 | `restore_shells` | true | reopen each task's shells in the same folders after a restart |
 | `shell.tmux` | false | run shells in tmux sessions (socket `pahiri`) that survive pahiri |
 | `agent.command` / `agent.args` | `claude` / `["-p"]` | one-shot agent; empty command disables |
@@ -418,7 +449,7 @@ Config: `~/.config/pahiri/config.toml`. Logs and generated shell files:
 | `font_family` | JetBrains Mono | advisory: terminal emulators own the font |
 | `large_file_kb` | 512 | bigger files ask before opening; binaries always ask |
 | `show_hidden` | false | `.` toggles at runtime |
-| `mouse` | true | mouse capture (Shift+drag still selects text) |
+| `mouse` | true | mouse capture (drag selects in the editor; Shift+drag uses the terminal's selection) |
 | `syntax_highlighting` | true | C, C++, Rust, Bash, Python, CMake, Make, logs, Markdown |
 | `tab_width` | 4 | editor rendering |
 | `scrollback_lines` | 5000 | per shell |
@@ -439,7 +470,7 @@ one, `d` deletes. Workspaces are written as `name = /path @main-branch`
 | task list | `↑/↓` move · `Enter` open · `J`/`K` reorder · `[`/`]` move task · `/` filter · `A` archived · `n` new · `d` delete · `m` timer · `v` checkpoint done · `O` outcome · `q` quit |
 | files | `Enter` open/toggle · `←/→` collapse/expand · `a`/`A` new file/folder · `r` rename · `d` delete · `.` hidden · `t` shell |
 | shells | `Enter` focus · `n` new · `x` close · `←` hide pane |
-| editor | `Ctrl+S` save · `Ctrl+W` close · `Ctrl+Z`/`Ctrl+Y` undo/redo · `Ctrl+F` find · `F3`/`Ctrl+G` next |
+| editor | `Ctrl+S` save · `Ctrl+W` close · `Ctrl+Z`/`Ctrl+Y` undo/redo · `Ctrl+F` find · `F3`/`Ctrl+G` next · selection and clipboard: see *Editing* |
 
 Large or binary files ask before opening; binaries open read-only as a hex
 dump. Rename, create and delete always act on the task folder only.

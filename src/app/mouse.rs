@@ -1,5 +1,6 @@
 //! Mouse handling: click to focus/select, double-click to open, wheel to scroll,
-//! and forwarding to programs that enabled mouse reporting.
+//! drag / double / triple click to select in the editor, and forwarding to
+//! programs that enabled mouse reporting.
 
 use std::time::{Duration, Instant};
 
@@ -57,6 +58,17 @@ impl App {
         double
     }
 
+    /// Count clicks in a row on the same cell: 1, 2 (word), 3 (line), then 1 again.
+    fn count_click(&mut self, m: MouseEvent) -> u8 {
+        let now = Instant::now();
+        let same = self.last_click.is_some_and(|(t, c, r)| {
+            c == m.column && r == m.row && now.duration_since(t) < DOUBLE_CLICK
+        });
+        self.click_count = if same { self.click_count % 3 + 1 } else { 1 };
+        self.last_click = Some((now, m.column, m.row));
+        self.click_count
+    }
+
     fn mouse_config(&mut self, m: MouseEvent) {
         let Mode::Config(form) = &mut self.mode else {
             return;
@@ -112,6 +124,16 @@ impl App {
 
     fn mouse_task(&mut self, m: MouseEvent) {
         let pos = Position::new(m.column, m.row);
+        // A selection drag keeps going when the pointer leaves the editor.
+        if self.editor_drag
+            && matches!(
+                m.kind,
+                MouseEventKind::Drag(MouseButton::Left) | MouseEventKind::Up(MouseButton::Left)
+            )
+        {
+            self.mouse_editor(m);
+            return;
+        }
         let ui_tree = self.ui.tree;
         let ui_shells = self.ui.shells;
         let ui_editor = self.ui.editor;
@@ -180,24 +202,61 @@ impl App {
         let rows = self.ui.editor_rows.clone();
         let tab_width = usize::from(self.config.tab_width.max(1));
         let height = usize::from(rect.height.max(1));
+        let clicks = if matches!(m.kind, MouseEventKind::Down(MouseButton::Left)) {
+            self.count_click(m)
+        } else {
+            0
+        };
+        match m.kind {
+            MouseEventKind::Down(MouseButton::Left) => self.editor_drag = clicks == 1,
+            MouseEventKind::Up(MouseButton::Left) => {
+                self.editor_drag = false;
+                return;
+            }
+            _ => {}
+        }
         let Some(ctx) = self.active_context_mut() else {
             return;
         };
         let Some(ed) = &mut ctx.editor else { return };
+        // Buffer position under the pointer; above / below the pane is the
+        // line just outside it, so dragging there scrolls.
+        let position = |ed: &crate::editor::Buffer| {
+            let (row, start) = if m.row < rect.y {
+                (ed.scroll().saturating_sub(1), 0)
+            } else if m.row >= rect.y + rect.height {
+                let last = rows.last().map_or(ed.scroll() + height - 1, |r| r.0);
+                (last + 1, 0)
+            } else {
+                let visual = usize::from(m.row - rect.y);
+                rows.get(visual)
+                    .copied()
+                    .unwrap_or((ed.scroll() + visual, hscroll))
+            };
+            let disp = usize::from(m.column.saturating_sub(rect.x + gutter)) + start;
+            let line = ed.lines().get(row).map_or("", String::as_str);
+            (row, char_col_at(line, disp, tab_width))
+        };
         match m.kind {
             MouseEventKind::ScrollUp => ed.scroll_by(-3, height),
             MouseEventKind::ScrollDown => ed.scroll_by(3, height),
             MouseEventKind::Down(MouseButton::Left) => {
-                let visual = usize::from(m.row - rect.y);
-                let (row, start) = rows
-                    .get(visual)
-                    .copied()
-                    .unwrap_or((ed.scroll() + visual, hscroll));
-                let disp = usize::from(m.column.saturating_sub(rect.x + gutter)) + start;
-                let line = ed.lines().get(row).map_or("", String::as_str);
-                let col = char_col_at(line, disp, tab_width);
+                let (row, col) = position(ed);
+                let extend = m.modifiers.contains(KeyModifiers::SHIFT);
+                ed.select(extend);
                 ed.set_cursor(row, col);
+                match clicks {
+                    2 => ed.select_word(),
+                    3 => ed.select_line(),
+                    _ if !extend => ed.set_anchor(),
+                    _ => {}
+                }
                 ctx.set_focus(Focus::Editor);
+            }
+            MouseEventKind::Drag(MouseButton::Left) => {
+                let (row, col) = position(ed);
+                ed.set_cursor(row, col);
+                ed.ensure_visible(height);
             }
             _ => {}
         }

@@ -140,6 +140,29 @@ plain_fg = fg_at("It does not flux")
 print("heading colour:", heading_fg, "plain colour:", plain_fg)
 if heading_fg == plain_fg:
     failures.append("markdown heading not highlighted")
+# Editor selection: Ctrl+Home, Shift+↓ selects and highlights; Ctrl+C copies, not quits.
+send("\x1b[1;5H", 0.3)
+send("\x1b[1;2B", 0.5)
+dump("keyboard selection", "2 lines selected")
+sel_bg = None
+for y, line in enumerate(screen.display):
+    x = line.find("# PROJ-42")
+    if x >= 0:
+        sel_bg = screen.buffer[y][x].bg
+if sel_bg in (None, "default"):
+    failures.append("selection is not highlighted")
+send("\x03", 0.5)
+dump("ctrl+c copies", "copied")
+send("\x1b[C", 0.3)                            # → drops the selection
+# Mouse drag from the heading down one row selects.
+for y, line in enumerate(screen.display):
+    x = line.find("# PROJ-42")
+    if x >= 0:
+        child.send(f"\x1b[<0;{x + 3};{y + 1}M\x1b[<32;{x + 3};{y + 2}M\x1b[<0;{x + 3};{y + 2}m")
+        break
+pump(0.5)
+dump("mouse drag selection", "lines selected")
+send("\x1b[C", 0.3)
 # Mouse: click on the CONTEXT.md row of the file tree (col 3, row 3) selects it and
 # focuses the files pane; a second click opens it (already open → focus editor).
 child.send("\x1b[<0;3;3M\x1b[<0;3;3m"); pump(0.5)
