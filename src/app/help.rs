@@ -121,6 +121,8 @@ GERRIT COMMAND (setting: Audit: Gerrit command)
    \"topic\":\"PROJ-42\",\"subject\":\"Fix token refresh\",
    \"created\":\"2026-07-02 10:00:00\",\"merged\":\"2026-07-09 16:00:00\"}
   examples/gerrit-mine.sh does this over ssh (gerrit query owner:self).
+  Big output: set Audit: Gerrit file and the changes are read from that file
+  (the command writes $PAHIRI_OUTPUT_FILE, or leave the command empty).
 
 THE AGENT'S ANSWER (fixed; the prompt template is audit.md, Esc E edits it)
   MAP C:<change> -> <task> | why        NEW C:<change> [C:…] -> <new-id> | title
@@ -138,6 +140,13 @@ SETTING   Esc c → Task sources → `name = command`, e.g.
           Exit non-zero on failure; the last lines of stderr are shown.
           In the settings, `t` on a source runs it now and shows what pahiri
           parsed (nothing is created).
+
+BIG OUTPUT  add `@file PATH` and pahiri reads the tickets from that file
+          instead of stdout:  jira = ~/bin/jira.sh @file ~/cache/jira.json
+          The command gets the path as $PAHIRI_OUTPUT_FILE (write there; its
+          stdout is ignored). With no command — jira = @file ~/cache/jira.json
+          — pahiri only reads the file (keep it fresh with cron or the
+          periodic hook); the picker says how old it is.
 
 OUTPUT    one of these three shapes:
 

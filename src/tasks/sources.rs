@@ -1,5 +1,6 @@
 //! Tickets produced by external task-source scripts.
 
+use std::path::Path;
 use std::process::Command;
 
 use serde::Deserialize;
@@ -209,13 +210,67 @@ pub fn parse_gerrit_status(output: &str) -> Result<Vec<GerritStatus>, String> {
     Ok(list)
 }
 
-/// Run a task source command through `sh -c` and parse its output.
-pub fn fetch(command: &str, task_dir: Option<&std::path::Path>) -> Result<Vec<Ticket>, String> {
-    let env: Vec<(String, String)> = task_dir
-        .map(|d| ("PAHIRI_TASKS_DIR".to_owned(), d.display().to_string()))
-        .into_iter()
-        .collect();
-    run_script(command, &env).and_then(|out| parse_tickets(&out))
+/// Output of a source that may write a file: run `command` (if any) with
+/// `$PAHIRI_OUTPUT_FILE` set to `file`, then read `file` — or, without a
+/// file, take the command's stdout. Returns the text and, for a file, a note
+/// like `read ~/jira.json (3 h old)`.
+pub fn run_or_read(
+    command: &str,
+    file: Option<&Path>,
+    env: &[(String, String)],
+) -> Result<(String, Option<String>), String> {
+    let mut env = env.to_vec();
+    if let Some(f) = file {
+        env.push(("PAHIRI_OUTPUT_FILE".into(), f.display().to_string()));
+    }
+    let stdout = if command.trim().is_empty() {
+        String::new()
+    } else {
+        run_script(command, &env)?
+    };
+    let Some(f) = file else {
+        return Ok((stdout, None));
+    };
+    let text = std::fs::read_to_string(f).map_err(|e| {
+        if e.kind() == std::io::ErrorKind::NotFound {
+            format!(
+                "no file {}: the command should write it (to $PAHIRI_OUTPUT_FILE), or run your export first",
+                f.display()
+            )
+        } else {
+            format!("cannot read {}: {e}", f.display())
+        }
+    })?;
+    let age = std::fs::metadata(f)
+        .and_then(|m| m.modified())
+        .ok()
+        .and_then(|t| t.elapsed().ok())
+        .map_or_else(String::new, |d| format!(", {} old", age(d.as_secs())));
+    Ok((text, Some(format!("read {}{age}", f.display()))))
+}
+
+/// `40 s`, `12 min`, `3 h`, `4 days`.
+fn age(secs: u64) -> String {
+    match secs {
+        s if s < 60 => format!("{s} s"),
+        s if s < 3600 => format!("{} min", s / 60),
+        s if s < 86_400 => format!("{} h", s / 3600),
+        s => format!("{} days", s / 86_400),
+    }
+}
+
+/// Tickets of a task source: its command's stdout, or its file.
+pub fn fetch_source(
+    command: &str,
+    file: Option<&Path>,
+    env: &[(String, String)],
+) -> Result<(Vec<Ticket>, Option<String>), String> {
+    let (text, note) = run_or_read(command, file, env)?;
+    let tickets = parse_tickets(&text).map_err(|e| match file {
+        Some(f) => format!("{}: {e}", f.display()),
+        None => e,
+    })?;
+    Ok((tickets, note))
 }
 
 /// Run a command through `sh -c` with `env`; stdout, or the exit status and
@@ -253,6 +308,46 @@ pub fn run_script(command: &str, env: &[(String, String)]) -> Result<String, Str
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::fs;
+
+    #[test]
+    fn sources_can_write_a_file_for_pahiri_to_read() {
+        let dir = tempfile::tempdir().unwrap();
+        let file = dir.path().join("jira.json");
+        // The command writes the file; its stdout is ignored.
+        let (tickets, note) = fetch_source(
+            r#"echo noise; printf '[{"id":"P-1","title":"From the file"}]' > "$PAHIRI_OUTPUT_FILE""#,
+            Some(&file),
+            &[],
+        )
+        .unwrap();
+        assert_eq!(tickets[0].title, "From the file");
+        let note = note.unwrap();
+        assert!(
+            note.starts_with(&format!("read {}", file.display())),
+            "{note}"
+        );
+        assert!(note.contains(" s old"), "{note}");
+        // No command: just the file (kept fresh by cron, say).
+        assert_eq!(fetch_source("", Some(&file), &[]).unwrap().0.len(), 1);
+        // Without a file, stdout as before.
+        let (t, note) = fetch_source("printf 'P-2\\tTwo'", None, &[]).unwrap();
+        assert_eq!((t[0].id.as_str(), note), ("P-2", None));
+        // Problems name the file.
+        let missing = dir.path().join("nope.json");
+        let e = fetch_source("true", Some(&missing), &[]).unwrap_err();
+        assert!(
+            e.starts_with(&format!("no file {}", missing.display())),
+            "{e}"
+        );
+        fs::write(&file, "[{broken").unwrap();
+        let e = fetch_source("", Some(&file), &[]).unwrap_err();
+        assert!(e.starts_with(&file.display().to_string()), "{e}");
+        // A failing command stops before reading.
+        assert!(fetch_source("exit 3", Some(&file), &[])
+            .unwrap_err()
+            .contains("exited"));
+    }
 
     #[test]
     fn parses_my_changes_for_the_audit() {
@@ -336,9 +431,11 @@ mod tests {
 
     #[test]
     fn fetch_runs_a_script() {
-        let t = fetch("printf 'X-1\\tTitle\\thttp://x\\n'", None).unwrap();
+        let t = fetch_source("printf 'X-1\\tTitle\\thttp://x\\n'", None, &[])
+            .unwrap()
+            .0;
         assert_eq!(t[0].id, "X-1");
-        let err = fetch("echo boom >&2; exit 3", None).unwrap_err();
+        let err = fetch_source("echo boom >&2; exit 3", None, &[]).unwrap_err();
         assert!(err.contains("boom"), "{err}");
     }
 }

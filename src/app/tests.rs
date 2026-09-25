@@ -337,10 +337,12 @@ fn create_task_from_ticket_source() {
             TaskSource {
                 name: "jira".into(),
                 command: script.into(),
+                file: None,
             },
             TaskSource {
                 name: "broken".into(),
                 command: "echo nope >&2; exit 2".into(),
+                file: None,
             },
         ];
     });
@@ -1110,6 +1112,7 @@ fn settings_help_and_source_test_run() {
         cfg.task_sources = vec![TaskSource {
             name: "jira".into(),
             command: "printf 'J-1\\tOne\\thttp://j/1\\n'".into(),
+            file: None,
         }];
     });
     h.press(key(KeyCode::Char(',')));
@@ -1305,6 +1308,7 @@ fn existing_ticket_offers_open_or_refresh() {
         cfg.task_sources = vec![TaskSource {
             name: "jira".into(),
             command: script.into(),
+            file: None,
         }];
     });
     h.press(key(KeyCode::Char('n')));
@@ -2044,6 +2048,7 @@ fn audit_scripts(cfg: &mut Config) {
         command: format!(
             "[ \"$PAHIRI_AUDIT\" = 1 ] && [ -n \"$PAHIRI_AUDIT_SINCE\" ] && printf '%s' '{tickets}'"
         ),
+        file: None,
     }];
     cfg.audit.gerrit_command = format!("printf '%s\\n' '{}'", changes.replace('\n', "' '"));
 }
@@ -2227,4 +2232,24 @@ fn audit_leaves_unmatched_changes_to_you() {
         .contains("#14 MERGED fw · Bump version"));
     let beta = fs::read_to_string(h.tasks.join("beta/CONTEXT.md")).unwrap_or_default();
     assert!(!beta.contains("- finished:"), "unticked");
+}
+
+#[test]
+fn new_task_from_a_source_file() {
+    let mut h = Harness::build(true, |cfg| {
+        let file = cfg.tasks_dir.join("../jira.json");
+        cfg.task_sources = vec![TaskSource {
+            name: "jira".into(),
+            command: r#"echo lots of noise; printf '[{"id":"BIG-1","title":"From the file"}]' > "$PAHIRI_OUTPUT_FILE""#.into(),
+            file: Some(file),
+        }];
+    });
+    h.press(key(KeyCode::Char('n')));
+    h.choose("from jira");
+    assert!(h.pump_until(|app| matches!(app.popup(), Some(Popup::Tickets { .. }))));
+    let Some(Popup::Tickets { tickets, .. }) = h.app.popup() else {
+        panic!()
+    };
+    assert_eq!(tickets[0].title, "From the file");
+    assert!(h.app.status().unwrap_or_default().contains("jira.json"));
 }

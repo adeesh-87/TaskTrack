@@ -14,8 +14,8 @@ pub enum JobEvent {
     Tickets {
         /// Source name.
         source: String,
-        /// Tickets, or an error message.
-        result: Result<Vec<Ticket>, String>,
+        /// Tickets (and where they were read from), or an error message.
+        result: Result<(Vec<Ticket>, Option<String>), String>,
         /// A dry run from the settings page (show, don't create).
         test: bool,
     },

@@ -495,6 +495,24 @@ ORB-42<TAB>Do the thing<TAB>https://orbit/ORB-42<TAB>first line\nsecond line
 `key`/`summary`/`link`/`body` are accepted as aliases. A non-zero exit shows
 the script's stderr.
 
+**Big output: read it from a file.** Add `file` and pahiri reads the
+tickets from there instead of stdout. The command gets the path as
+`$PAHIRI_OUTPUT_FILE` (write the tickets there; stdout is ignored), or
+leave the command empty when something else keeps the file fresh — cron,
+or the `periodic` hook. The picker's status line says how old the file is.
+
+```toml
+[[task_sources]]
+name = "jira"
+command = "~/bin/jira.sh"            # may be "" to only read the file
+file = "~/.cache/pahiri/jira.json"
+```
+
+On the settings page: `jira = ~/bin/jira.sh @file ~/.cache/pahiri/jira.json`
+(or `jira = @file …`). The audit's Gerrit command has the same option,
+`audit.gerrit_file`. `examples/jira.sh` and `examples/gerrit-mine.sh`
+write to `$PAHIRI_OUTPUT_FILE` when it is set.
+
 ## Attach and prepare
 
 Declare checkouts and builds once (`Esc`, `c`):

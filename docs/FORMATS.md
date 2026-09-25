@@ -91,6 +91,9 @@ Run through `sh -c`; print one of: JSON array, JSON lines, or TSV
 `id<TAB>title<TAB>url<TAB>description` (`\n` escapes in the description).
 Only `id` is required. Aliases: `key`, `summary`, `link`, `body`.
 Non-zero exit = error (stderr tail is shown). Examples in `examples/`.
+With `file` set (`jira = cmd @file PATH` on the settings page) the output is
+read from that file instead; the command gets it as `$PAHIRI_OUTPUT_FILE`
+and may be empty. Same for `audit.gerrit_file`.
 
 Audit extras (all optional; see the help page's Audit tab): `status`
 (alias `state`), `done` (bool), `created`, `started`, `finished` (aliases
