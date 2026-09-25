@@ -5,6 +5,9 @@
 #   [audit]
 #   gerrit_command = "~/src/pahiri/examples/gerrit-mine.sh"
 #
+# With audit.gerrit_file set, pahiri sets PAHIRI_OUTPUT_FILE and the changes go
+# there instead of stdout.
+#
 # Needs ssh access to Gerrit and jq. Environment:
 #   GERRIT_SSH    e.g. me@review.example.com   (required)
 #   GERRIT_PORT   default 29418
@@ -15,6 +18,10 @@ PORT="${GERRIT_PORT:-29418}"
 SINCE="${PAHIRI_AUDIT_SINCE:-1970-01-01}"
 QUERY="${GERRIT_QUERY:-owner:self after:$SINCE}"
 
+# Collect into a temporary file; a failed query (set -e stops the script)
+# leaves the last good output file as it was.
+out=$(mktemp)
+trap 'rm -f "$out"' EXIT
 # ssh query pages at 500 results; --start continues.
 start=0
 while :; do
@@ -35,8 +42,13 @@ while :; do
     labels: ([.currentPatchSet.approvals[]? |
       ((.type | sub("Code-Review"; "CR") | sub("Verified"; "V")) +
        (if (.value | tonumber) > 0 then "+" else "" end) + .value)] | join(" "))
-  }'
+  }' >> "$out"
   more=$(printf '%s\n' "$page" | jq -r 'select(.type == "stats") | .moreChanges // false')
   [ "$more" = true ] || break
   start=$((start + $(printf '%s\n' "$page" | jq -r 'select(.type == "stats") | .rowCount')))
 done
+if [ -n "${PAHIRI_OUTPUT_FILE:-}" ]; then
+  mv "$out" "$PAHIRI_OUTPUT_FILE"
+else
+  cat "$out"
+fi

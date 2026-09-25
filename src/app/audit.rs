@@ -239,15 +239,16 @@ impl App {
             self.set_status("set up the tasks folder first");
             return;
         }
-        let sources: Vec<(String, String)> = self
+        let sources: Vec<(String, String, Option<std::path::PathBuf>)> = self
             .config
             .task_sources
             .iter()
-            .filter(|s| !s.command.trim().is_empty())
-            .map(|s| (s.name.clone(), s.command.clone()))
+            .filter(|s| !s.command.trim().is_empty() || s.file_path().is_some())
+            .map(|s| (s.name.clone(), s.command.clone(), s.file_path()))
             .collect();
         let gerrit = self.config.audit.gerrit_command.trim().to_owned();
-        if sources.is_empty() && gerrit.is_empty() {
+        let gerrit_file = self.config.audit.gerrit_file_path();
+        if sources.is_empty() && gerrit.is_empty() && gerrit_file.is_none() {
             self.popup = Some(Popup::message(
                 "Nothing to audit yet",
                 "The audit needs your tickets and/or your Gerrit changes:\n\n\
@@ -282,13 +283,15 @@ impl App {
                 let log = |l: String| events.send(AppEvent::Job(JobEvent::Log(l)));
                 let mut tickets = Vec::new();
                 let mut notes = Vec::new();
-                for (name, command) in &sources {
+                for (name, command, file) in &sources {
                     log(format!("tickets · {name} …"));
-                    match sources::run_script(command, &env)
-                        .and_then(|o| sources::parse_tickets(&o))
-                    {
-                        Ok(list) => {
-                            log(format!("  {} ticket(s)", list.len()));
+                    match sources::fetch_source(command, file.as_deref(), &env) {
+                        Ok((list, note)) => {
+                            log(format!(
+                                "  {} ticket(s){}",
+                                list.len(),
+                                note.map_or_else(String::new, |n| format!(" · {n}"))
+                            ));
                             tickets.extend(list.into_iter().map(|t| (name.clone(), t)));
                         }
                         Err(e) => {
@@ -299,13 +302,17 @@ impl App {
                     }
                 }
                 let mut changes = Vec::new();
-                if !gerrit.is_empty() {
+                if !gerrit.is_empty() || gerrit_file.is_some() {
                     log("changes · Gerrit …".into());
-                    match sources::run_script(&gerrit, &env)
-                        .and_then(|o| sources::parse_gerrit_status(&o))
+                    match sources::run_or_read(&gerrit, gerrit_file.as_deref(), &env)
+                        .and_then(|(o, note)| sources::parse_gerrit_status(&o).map(|l| (l, note)))
                     {
-                        Ok(list) => {
-                            log(format!("  {} change(s)", list.len()));
+                        Ok((list, note)) => {
+                            log(format!(
+                                "  {} change(s){}",
+                                list.len(),
+                                note.map_or_else(String::new, |n| format!(" · {n}"))
+                            ));
                             changes = list;
                         }
                         Err(e) => {

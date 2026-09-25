@@ -65,6 +65,8 @@ pub enum FieldKey {
     AuditPrompt,
     /// Command listing my Gerrit changes.
     AuditGerrit,
+    /// File the Gerrit changes are read from.
+    AuditGerritFile,
     /// Days the audit looks back.
     AuditSince,
     /// Let the agent match what the rules could not.
@@ -246,15 +248,32 @@ fn parse_build(item: &str) -> Result<VendorBuild, String> {
     })
 }
 
-/// Parse `name = command ...`.
+/// Parse `name = command ...`, optionally ending in `@file PATH` (read the
+/// tickets from PATH): `jira = ~/bin/jira.sh @file ~/jira.json`, or
+/// `jira = @file ~/jira.json` for a file kept fresh by something else.
 pub fn parse_source(item: &str) -> Result<TaskSource, String> {
-    let (name, command) = item
+    let (name, rest) = item
         .split_once('=')
         .ok_or_else(|| format!("task source {item:?}: expected `name = command`"))?;
+    let rest = rest.trim();
+    let (command, file) = match rest.rsplit_once("@file ") {
+        Some((c, f)) if c.is_empty() || c.ends_with(' ') => (c.trim(), Some(f.trim())),
+        _ => (rest, None),
+    };
     Ok(TaskSource {
         name: name.trim().to_owned(),
-        command: command.trim().to_owned(),
+        command: command.to_owned(),
+        file: file.filter(|f| !f.is_empty()).map(Config::expand_tilde),
     })
+}
+
+/// A task source as a list item (the inverse of [`parse_source`]).
+fn source_item(t: &TaskSource) -> String {
+    match &t.file {
+        Some(f) if t.command.trim().is_empty() => format!("{} = @file {}", t.name, f.display()),
+        Some(f) => format!("{} = {} @file {}", t.name, t.command, f.display()),
+        None => format!("{} = {}", t.name, t.command),
+    }
 }
 
 impl ConfigForm {
@@ -300,8 +319,8 @@ impl ConfigForm {
             field(
                 FieldKey::TaskSources,
                 "Task sources",
-                "`name = /path/to/script [args]` e.g. `jira = ~/bin/jira-mine.sh`. ? shows the output format · t on a source runs it now.",
-                Value::List(cfg.task_sources.iter().map(|t| format!("{} = {}", t.name, t.command)).collect()),
+                "`name = /path/to/script [args]` e.g. `jira = ~/bin/jira-mine.sh`; add `@file ~/jira.json` to read the tickets from that file (the script writes $PAHIRI_OUTPUT_FILE; `jira = @file ~/jira.json` only reads it). ? shows the output format · t on a source runs it now.",
+                Value::List(cfg.task_sources.iter().map(source_item).collect()),
             ),
             field(
                 FieldKey::Hooks,
@@ -380,6 +399,18 @@ impl ConfigForm {
                 "Audit: Gerrit command",
                 "Prints your Gerrit changes since $PAHIRI_AUDIT_SINCE as JSON lines (? shows the format; examples/gerrit-mine.sh).",
                 Value::Text(cfg.audit.gerrit_command.clone()),
+            ),
+            field(
+                FieldKey::AuditGerritFile,
+                "Audit: Gerrit file",
+                "Read your changes from this file instead of the command's output (the command gets it as $PAHIRI_OUTPUT_FILE and may be empty). For big outputs or an export made elsewhere.",
+                Value::Text(
+                    cfg.audit
+                        .gerrit_file
+                        .as_ref()
+                        .map(|f| f.display().to_string())
+                        .unwrap_or_default(),
+                ),
             ),
             field(
                 FieldKey::AuditSince,
@@ -1002,6 +1033,10 @@ impl ConfigForm {
                 (FieldKey::AuditGerrit, Value::Text(v)) => {
                     v.trim().clone_into(&mut cfg.audit.gerrit_command);
                 }
+                (FieldKey::AuditGerritFile, Value::Text(v)) => {
+                    cfg.audit.gerrit_file =
+                        (!v.trim().is_empty()).then(|| Config::expand_tilde(v.trim()));
+                }
                 (FieldKey::AuditSince, Value::Number(v)) => match v.trim().parse() {
                     Ok(n) if n > 0 => cfg.audit.since_days = n,
                     _ => errors.push(format!(
@@ -1152,6 +1187,30 @@ mod tests {
     use std::path::PathBuf;
 
     use super::*;
+
+    #[test]
+    fn task_sources_may_name_a_file() {
+        let s = parse_source("jira = ~/bin/jira.sh --mine @file /tmp/jira.json").unwrap();
+        assert_eq!(s.command, "~/bin/jira.sh --mine");
+        assert_eq!(
+            s.file.as_deref(),
+            Some(std::path::Path::new("/tmp/jira.json"))
+        );
+        assert_eq!(
+            source_item(&s),
+            "jira = ~/bin/jira.sh --mine @file /tmp/jira.json"
+        );
+        let only = parse_source("jira = @file /tmp/jira.json").unwrap();
+        assert_eq!((only.command.as_str(), only.file.is_some()), ("", true));
+        assert_eq!(source_item(&only), "jira = @file /tmp/jira.json");
+        let plain = parse_source("jira = get-tickets --x@file y").unwrap();
+        assert_eq!(plain.file, None, "only a separate @file word counts");
+        let cfg = Config {
+            task_sources: vec![only],
+            ..Config::default()
+        };
+        assert!(!cfg.validate().iter().any(|e| e.contains("no command")));
+    }
 
     fn key(code: KeyCode) -> KeyEvent {
         KeyEvent::new(code, KeyModifiers::NONE)

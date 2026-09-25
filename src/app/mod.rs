@@ -621,6 +621,7 @@ impl App {
             | K::CodingStartInCode => HelpTopic::Agents,
             K::AuditPrompt
             | K::AuditGerrit
+            | K::AuditGerritFile
             | K::AuditSince
             | K::AuditAgent
             | K::AuditDone
@@ -1109,7 +1110,13 @@ impl App {
         }];
         for s in &self.config.task_sources {
             choices.push(Choice {
-                label: format!("from {}  ({})", s.name, s.command),
+                label: match s.file_path() {
+                    Some(f) if s.command.trim().is_empty() => {
+                        format!("from {}  (file {})", s.name, f.display())
+                    }
+                    Some(f) => format!("from {}  ({} → {})", s.name, s.command, f.display()),
+                    None => format!("from {}  ({})", s.name, s.command),
+                },
                 pending: Pending::FetchTickets(s.name.clone()),
             });
         }
@@ -1135,14 +1142,24 @@ impl App {
         let tasks_dir = self.config.tasks_dir.clone();
         let events = self.events.clone();
         let name = src.name.clone();
+        let file = src.file_path();
         self.popup = Some(Popup::log(format!("Fetching tickets from {}", src.name)));
         if let Some(Popup::Log { lines, .. }) = &mut self.popup {
-            lines.push(format!("$ {}", src.command));
+            if !src.command.trim().is_empty() {
+                lines.push(format!("$ {}", src.command));
+            }
+            if let Some(f) = &file {
+                lines.push(format!("reading {}", f.display()));
+            }
         }
         let spawned = std::thread::Builder::new()
             .name(format!("source-{name}"))
             .spawn(move || {
-                let result = sources::fetch(&src.command, Some(&tasks_dir));
+                let env = vec![(
+                    "PAHIRI_TASKS_DIR".to_owned(),
+                    tasks_dir.display().to_string(),
+                )];
+                let result = sources::fetch_source(&src.command, file.as_deref(), &env);
                 events.send(AppEvent::Job(JobEvent::Tickets {
                     source: name,
                     result,
@@ -1695,10 +1712,11 @@ impl App {
                 test: true,
             } => {
                 self.popup = Some(match result {
-                    Ok(tickets) => {
+                    Ok((tickets, note)) => {
                         let mut text = format!(
-                            "{} ticket(s) parsed — test run, nothing was created.\n\n",
-                            tickets.len()
+                            "{} ticket(s) parsed{} — test run, nothing was created.\n\n",
+                            tickets.len(),
+                            note.map_or_else(String::new, |n| format!(" ({n})"))
                         );
                         for t in &tickets {
                             let _ = writeln!(text, "{:<14} {}", t.task_id(), t.title);
@@ -1738,10 +1756,14 @@ impl App {
                 result,
             } => self.handle_agent_result(&task_id, kind, result),
             JobEvent::Tickets { source, result, .. } => match result {
-                Ok(tickets) if tickets.is_empty() => {
-                    self.popup = Some(Popup::message(source, "the script returned no tickets"));
+                Ok((tickets, note)) if tickets.is_empty() => {
+                    let what = note.unwrap_or_else(|| "the script".into());
+                    self.popup = Some(Popup::message(source, format!("no tickets ({what})")));
                 }
-                Ok(tickets) => {
+                Ok((tickets, note)) => {
+                    if let Some(n) = note {
+                        self.set_status(format!("{source}: {} ticket(s), {n}", tickets.len()));
+                    }
                     self.popup = Some(Popup::Tickets {
                         source,
                         tickets,

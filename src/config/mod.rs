@@ -143,13 +143,39 @@ pub struct VendorBuild {
 ///
 /// The command runs through `sh -c` and must print tickets on stdout, either
 /// as a JSON array / JSON lines of `{"id", "title", "url", "description"}`
-/// or as tab separated `id<TAB>title<TAB>url<TAB>description` lines.
+/// or as tab separated `id<TAB>title<TAB>url<TAB>description` lines — or
+/// write them to `file`, which pahiri then reads instead.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct TaskSource {
     /// Name shown in the "new task" chooser, e.g. `jira`.
     pub name: String,
-    /// Shell command line to run.
+    /// Shell command line to run (may be empty when `file` is kept up to
+    /// date by something else, e.g. cron).
     pub command: String,
+    /// Read the tickets from this file instead of the command's stdout. The
+    /// command gets its path as `$PAHIRI_OUTPUT_FILE`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub file: Option<PathBuf>,
+}
+
+impl AuditConfig {
+    /// `gerrit_file` with `~` expanded.
+    pub fn gerrit_file_path(&self) -> Option<PathBuf> {
+        self.gerrit_file
+            .as_ref()
+            .filter(|f| !f.as_os_str().is_empty())
+            .map(|f| Config::expand_tilde(&f.display().to_string()))
+    }
+}
+
+impl TaskSource {
+    /// `file` with `~` expanded.
+    pub fn file_path(&self) -> Option<PathBuf> {
+        self.file
+            .as_ref()
+            .filter(|f| !f.as_os_str().is_empty())
+            .map(|f| Config::expand_tilde(&f.display().to_string()))
+    }
 }
 
 /// One-shot agent used to generate context and checkpoints.
@@ -243,6 +269,10 @@ impl Default for TimerConfig {
 pub struct AuditConfig {
     /// Command that prints your Gerrit changes as JSON lines (help page, Audit tab).
     pub gerrit_command: String,
+    /// Read the changes from this file instead of the command's stdout (the
+    /// command gets its path as `$PAHIRI_OUTPUT_FILE`; it may be empty).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub gerrit_file: Option<PathBuf>,
     /// How far back to look, in days (scripts get `$PAHIRI_AUDIT_SINCE`).
     pub since_days: u64,
     /// Let the agent decide what the rules could not match.
@@ -257,6 +287,7 @@ impl Default for AuditConfig {
     fn default() -> Self {
         Self {
             gerrit_command: String::new(),
+            gerrit_file: None,
             since_days: 90,
             use_agent: true,
             done_statuses: Vec::new(),
@@ -542,8 +573,8 @@ impl Config {
             } else if !names.insert(t.name.clone()) {
                 errors.push(format!("duplicate task source name {:?}", t.name));
             }
-            if t.command.trim().is_empty() {
-                errors.push(format!("task source {} has no command", t.name));
+            if t.command.trim().is_empty() && t.file.is_none() {
+                errors.push(format!("task source {} has no command or file", t.name));
             }
         }
         if self.agent.timeout_secs == 0 {
@@ -667,6 +698,7 @@ mod tests {
             task_sources: vec![TaskSource {
                 name: "jira".into(),
                 command: "jira-list".into(),
+                file: None,
             }],
             ..Config::default()
         };
@@ -684,6 +716,7 @@ mod tests {
             task_sources: vec![TaskSource {
                 name: "jira".into(),
                 command: " ".into(),
+                file: None,
             }],
             ..cfg.clone()
         };
