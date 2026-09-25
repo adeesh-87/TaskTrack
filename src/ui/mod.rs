@@ -1,10 +1,12 @@
 //! Drawing. Everything here reads [`App`] state and paints it with ratatui.
 
 mod config_page;
+mod plan_view;
 mod popup;
 mod task_list;
 mod task_view;
 pub mod theme;
+mod today;
 
 use ratatui::layout::{Constraint, Layout, Rect};
 use ratatui::style::{Modifier, Style};
@@ -12,7 +14,7 @@ use ratatui::text::{Line, Span};
 use ratatui::widgets::Paragraph;
 use ratatui::Frame;
 
-use crate::app::{App, Focus, Mode, Popup};
+use crate::app::{App, Focus, HomeFocus, Mode, Popup};
 
 pub use theme::Theme;
 
@@ -31,12 +33,14 @@ pub fn draw(frame: &mut Frame<'_>, app: &mut App) {
     let [main, bar] = Layout::vertical([Constraint::Min(1), Constraint::Length(1)]).areas(area);
 
     match app.mode() {
-        Mode::Config(_) => config_page::draw(frame, app, main, &theme),
-        Mode::TaskList => {
+        Mode::Settings(_) => config_page::draw(frame, app, main, &theme),
+        Mode::Home => {
             let [left, right] = split_columns(main);
-            task_list::draw(frame, app, left, &theme, true);
-            task_view::draw_next_up(frame, app, right, &theme);
+            let board_focused = app.home_focus() == HomeFocus::Board;
+            task_list::draw(frame, app, left, &theme, board_focused);
+            today::draw_today(frame, app, right, &theme);
         }
+        Mode::Plan(_) => plan_view::draw(frame, app, main, &theme),
         Mode::Task => {
             let zoomed = app
                 .active_context()
@@ -130,14 +134,20 @@ fn draw_status_bar(frame: &mut Frame<'_>, app: &mut App, area: Rect, theme: &The
         Some(Popup::Help { .. }) => "←/→ tabs · ↑/↓ scroll · any other key closes".to_owned(),
         Some(_) => "Enter confirm · Esc cancel".to_owned(),
         None => match app.mode() {
-            Mode::Config(form) if form.editing() => "Enter apply · Esc cancel edit".to_owned(),
-            Mode::Config(_) => {
+            Mode::Settings(form) if form.editing() => "Enter apply · Esc cancel edit".to_owned(),
+            Mode::Settings(_) => {
                 "↑/↓ select · Enter edit · a add · d delete · ←/→ cycle · ? help · t test source · Ctrl+S save · Esc back".to_owned()
             }
-            Mode::TaskList => match app.list_filter() {
+            Mode::Home if app.home_focus() == HomeFocus::Today => {
+                "Enter timer · Space tick · J/K order · x remove · o open · p plan · Tab board · Esc commands".to_owned()
+            }
+            Mode::Home => match app.list_filter() {
                 (f, true) => format!("filter: {f}▏ · Enter keep · Esc clear"),
-                _ => "Esc commands · F1 help · Enter open · / filter · J/K reorder · m timer · v done · d delete".to_owned(),
+                _ => "Esc commands · F1 help · Enter open · p plan day · Tab today · / filter · J/K reorder · m timer · d delete".to_owned(),
             },
+            Mode::Plan(_) => {
+                "Space pick · s suggest · a add · t add to task · Tab switch · J/K order · x remove · A all columns · Enter save · Esc cancel".to_owned()
+            }
             Mode::Task => match app.active_context().map(|c| c.focus) {
                 Some(Focus::Terminal) if app.leader_pending() => {
                     format!("{leader} + q leave · z zoom · n new · a agent · m timer · ? help")

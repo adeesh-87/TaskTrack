@@ -189,7 +189,7 @@ impl App {
                 );
                 palette_lines(
                     &mut out,
-                    "TASK LIST PALETTE",
+                    "HOME PALETTE",
                     keymap::apply_palette_overrides(palette::list_commands(), &cfg.keys),
                 );
                 palette_lines(
@@ -212,8 +212,14 @@ impl App {
                 }
                 out.push_str("  Esc palette · leader twice sends the leader key to the shell\n\n");
                 out.push_str(
-                    "TASK LIST\n  ↑/↓ j/k move · Enter open · J/K (Shift+↑/↓) reorder in column · [ ] move column\n  \
-                     / filter by id or title · A show/hide archived · d delete · n new · m timer · v done\n\n\
+                    "VIEWS  Home (board + Today) · Plan · Task · Settings · Help (this overlay)\n\n\
+                     HOME: BOARD\n  ↑/↓ j/k move · Enter open · J/K (Shift+↑/↓) reorder in column · [ ] move column\n  \
+                     / filter by id or title · A show/hide archived · d delete · n new · m timer · v done\n  \
+                     p plan the day · Tab → Today\n\n\
+                     HOME: TODAY\n  ↑/↓ move · Enter start the timer · Space tick · J/K order · x remove · o open task\n  \
+                     p plan · Tab → board\n\n\
+                     PLAN\n  Space pick · s suggest · a add a free item · t add one for the task · Tab/←→ sides\n  \
+                     J/K order · x remove · A all columns · Enter save · Esc cancel\n\n\
                      PANES (task view)\n  Ctrl+Tab / Ctrl+Shift+Tab or Alt+] / Alt+[   next / previous pane\n  \
                      Ctrl+1..9 / Alt+1..9   select shell N\n\n\
                      FILES\n  Enter open/toggle · ←/→ collapse/expand · a new file · A new folder · r rename\n  \
@@ -257,10 +263,30 @@ impl App {
                      (one line per booking: time, task, minutes, what) and ## Log (one line per session).\n  \
                      Dates: created, started (first timer or first move out of column 1), finished\n  \
                      (moved to the last column). Esc O records a one-line outcome for reviews.\n\n\
-                     TODAY / NEXT UP (task list, right side)\n  Time booked today and this week, what you finished, your estimate factor\n  \
-                     (spent ÷ estimated over finished checkpoints) and each open task's next step.\n  \
-                     Finished tasks older than {} days are archived (A shows them).\n",
-                    cfg.timer.focus_minutes, cfg.timer.idle_minutes, cfg.archive_after_days
+                     PLAN THE DAY (p on Home, Esc y anywhere: the Plan view)\n  \
+                     Left: open checkpoints of the tasks in progress (setting: Plan from columns;\n  \
+                     A shows every open column) and what the last plan left unfinished.\n  \
+                     Space picks (on a task: all of it) · s suggests: carried-over items, then each\n  \
+                     task's next checkpoint in board order until the day is full ({}) ·\n  \
+                     a adds a free item (\"Email the vendor 15m\") · t adds one for the task.\n  \
+                     Right: the plan in order · J/K move · x removes · Enter saves · Esc cancels.\n  \
+                     Estimates are scaled by your pace (spent ÷ estimated on finished checkpoints).\n\n\
+                     TODAY (Home, right side; Tab moves there)\n  \
+                     The plan: Enter starts the timer on an item · Space ticks it (a checkpoint is\n  \
+                     ticked in its CONTEXT.md) · J/K order · x removes · o opens the task.\n  \
+                     The timer's done → next follows the plan, across tasks.\n  \
+                     Below: time booked today / this week, your pace, and the open work.\n  \
+                     Finished tasks older than {} days are archived (A shows them).\n\n\
+                     THE PLAN FILE  <tasks>/.pahiri/plans/<date>.md — yours to edit too:\n    \
+                     - [ ] PROJ-42 · Write the parser (1h)     a checkpoint of PROJ-42\n    \
+                     - [ ] PROJ-42 · Reply to review (20m)     a task item (timed on PROJ-42)\n    \
+                     - [ ] Email the vendor (15m)              a free item\n  \
+                     Scripts: pahiri plan show [--json] · pahiri plan add [--task ID] <text 20m>.\n  \
+                     Hooks: day_start (first run of a day), plan_save.\n",
+                    cfg.timer.focus_minutes,
+                    cfg.timer.idle_minutes,
+                    crate::tasks::checkpoints::fmt_minutes(cfg.planner.day_minutes),
+                    cfg.archive_after_days
                 );
             }
             HelpTopic::Agents => {
@@ -408,6 +434,8 @@ impl App {
                  pahiri task move --to <column>   move on the board (name or 0-based index)\n  \
                  pahiri task outcome <text…>      add a line to ## Outcome\n  \
                  pahiri report [--from D] [--to D] [--json]   tasks active in a range (reviews)\n  \
+                 pahiri plan show [--date D] [--json]         the day plan with each item's state\n  \
+                 pahiri plan add [--task ID] <text 20m>       add to today's plan\n  \
                  pahiri trash empty [--older-than 30d]        delete old trashed tasks\n  \
                  pahiri install-skills <dir> [--force]        write the bundled agent skills\n  \
                  pahiri --show-config             config, log and state paths\n\n\

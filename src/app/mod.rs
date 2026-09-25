@@ -21,6 +21,7 @@ mod hooks;
 mod session;
 
 mod mouse;
+mod plan;
 mod work;
 
 use std::collections::{BTreeMap, HashMap, VecDeque};
@@ -51,6 +52,7 @@ pub use self::context::{Focus, Shell, TaskContext};
 pub use self::event::{AppEvent, EventSender, JobEvent};
 pub use self::help::HelpTopic;
 pub use self::palette::{Action, Palette};
+pub use self::plan::{HomeFocus, ItemStatus, PlanFocus, PlanRow, PlanView};
 pub use self::popup::{CheckItem, Choice, Pending, Popup};
 pub use self::ui_state::UiState;
 pub use self::work::Today;
@@ -63,11 +65,13 @@ use self::session::SavedShell;
 /// Which top-level screen is showing.
 #[derive(Debug)]
 pub enum Mode {
-    /// The settings page.
-    Config(ConfigForm),
-    /// The task board with an empty right side.
-    TaskList,
-    /// Working inside one task.
+    /// Settings view: the settings form.
+    Settings(ConfigForm),
+    /// Home view: the board (left) and the Today pane (right).
+    Home,
+    /// Plan view: choosing today's work.
+    Plan(PlanView),
+    /// Task view: working inside one task.
     Task,
 }
 
@@ -132,6 +136,18 @@ pub struct App {
     next_up: Vec<TaskRecord>,
     records: HashMap<String, (Option<SystemTime>, TaskRecord)>,
     today: Today,
+    /// Today's plan (`<tasks>/.pahiri/plans/<date>.md`), in order.
+    plan: Vec<crate::tasks::plan::PlanItem>,
+    /// The day `plan` is for.
+    plan_date: String,
+    /// Modification time of the plan file when read (outside changes).
+    plan_mtime: Option<SystemTime>,
+    /// Unfinished items of an earlier plan while today has none.
+    carry_hint: Option<(String, usize)>,
+    /// Which pane of Home has the keys.
+    home_focus: HomeFocus,
+    /// Selected item of the Today pane.
+    today_selected: usize,
     /// When the app started (for blinking).
     started: Instant,
     /// Last key press, paste or mouse event (idle check).
@@ -161,16 +177,16 @@ impl App {
         events: EventSender,
     ) -> Self {
         let (config, mode) = match config {
-            Some(cfg) if cfg.validate().is_empty() => (cfg, Mode::TaskList),
+            Some(cfg) if cfg.validate().is_empty() => (cfg, Mode::Home),
             Some(cfg) => {
                 let mut form = ConfigForm::new(&cfg, true);
                 form.set_errors(cfg.validate());
-                (cfg, Mode::Config(form))
+                (cfg, Mode::Settings(form))
             }
             None => {
                 let cfg = Config::default();
                 let form = ConfigForm::new(&cfg, true);
-                (cfg, Mode::Config(form))
+                (cfg, Mode::Settings(form))
             }
         };
         let leader = config.leader();
@@ -206,6 +222,12 @@ impl App {
             next_up: Vec::new(),
             records: HashMap::new(),
             today: Today::default(),
+            plan: Vec::new(),
+            plan_date: String::new(),
+            plan_mtime: None,
+            carry_hint: None,
+            home_focus: HomeFocus::Board,
+            today_selected: 0,
             started: Instant::now(),
             last_input: Instant::now(),
             hooks_running: 0,
@@ -219,10 +241,11 @@ impl App {
             leader_table,
             search: None,
         };
-        if matches!(app.mode, Mode::TaskList) {
+        if matches!(app.mode, Mode::Home) {
             app.open_store();
             app.restore_session();
             app.fire_hook(HookEvent::Startup, None, Vec::new(), AfterHook::Nothing);
+            app.check_day();
         }
         app
     }
@@ -362,6 +385,7 @@ impl App {
                 self.store = Some(store);
                 self.select_first_task();
                 self.refresh_next_up();
+                self.load_plan();
             }
             Err(e) => {
                 self.store = None;
@@ -400,6 +424,10 @@ impl App {
     fn current_task_id(&self) -> Option<String> {
         match self.mode {
             Mode::Task => self.active_task.clone(),
+            Mode::Home if self.home_focus == HomeFocus::Today => self
+                .plan
+                .get(self.today_selected)
+                .and_then(|i| i.task.clone()),
             _ => self.selected_task_id(),
         }
     }
@@ -462,7 +490,7 @@ impl App {
             Some(_) => return,
             None => {}
         }
-        if let Mode::Config(form) = &mut self.mode {
+        if let Mode::Settings(form) = &mut self.mode {
             form.paste(text);
             return;
         }
@@ -506,8 +534,9 @@ impl App {
             return;
         }
         match self.mode {
-            Mode::Config(_) => self.handle_config_key(key),
-            Mode::TaskList => self.handle_list_key(key),
+            Mode::Settings(_) => self.handle_config_key(key),
+            Mode::Plan(_) => self.handle_plan_key(key),
+            Mode::Home => self.handle_list_key(key),
             Mode::Task => self.handle_task_key(key),
         }
     }
@@ -516,11 +545,11 @@ impl App {
 
     fn handle_config_key(&mut self, key: KeyEvent) {
         let (editing, first_run) = match &self.mode {
-            Mode::Config(form) => (form.editing(), form.first_run()),
+            Mode::Settings(form) => (form.editing(), form.first_run()),
             _ => return,
         };
         if editing {
-            if let Mode::Config(form) = &mut self.mode {
+            if let Mode::Settings(form) = &mut self.mode {
                 form.handle_edit_key(key);
             }
             return;
@@ -538,7 +567,7 @@ impl App {
             (KeyCode::Char('?'), _) | (KeyCode::F(1), _) => self.config_help(),
             (KeyCode::Char('t'), KeyModifiers::NONE) if self.test_selected_source() => {}
             _ => {
-                if let Mode::Config(form) = &mut self.mode {
+                if let Mode::Settings(form) = &mut self.mode {
                     form.handle_nav_key(key);
                 }
             }
@@ -547,7 +576,7 @@ impl App {
 
     fn config_help(&mut self) {
         use config_form::FieldKey as K;
-        let Mode::Config(form) = &self.mode else {
+        let Mode::Settings(form) = &self.mode else {
             return;
         };
         let topic = match form.fields()[form.selected_field()].key {
@@ -565,9 +594,13 @@ impl App {
             K::Hooks | K::HookTimeout => HelpTopic::Hooks,
             K::GerritUrl | K::GerritStatus => HelpTopic::Gerrit,
             K::Keys | K::LeaderKey | K::CopyCommand | K::PasteCommand => HelpTopic::Keys,
-            K::FocusMinutes | K::TimerFlash | K::TimerBell | K::IdleMinutes | K::ArchiveDays => {
-                HelpTopic::Work
-            }
+            K::FocusMinutes
+            | K::TimerFlash
+            | K::TimerBell
+            | K::IdleMinutes
+            | K::ArchiveDays
+            | K::PlannerDay
+            | K::PlannerColumns => HelpTopic::Work,
             _ => HelpTopic::Files,
         };
         self.open_help(topic);
@@ -584,7 +617,7 @@ impl App {
 
     /// `t` on a task-source item: run it now and show what was parsed.
     fn test_selected_source(&mut self) -> bool {
-        let Mode::Config(form) = &self.mode else {
+        let Mode::Settings(form) = &self.mode else {
             return false;
         };
         let Some(item) = form.selected_item(config_form::FieldKey::TaskSources) else {
@@ -598,7 +631,7 @@ impl App {
     }
 
     fn save_config(&mut self) {
-        let Mode::Config(form) = &mut self.mode else {
+        let Mode::Settings(form) = &mut self.mode else {
             return;
         };
         let (candidate, mut errors) = form.to_config(&self.config);
@@ -636,7 +669,7 @@ impl App {
     }
 
     fn leave_config(&mut self) {
-        let dirty = matches!(&self.mode, Mode::Config(form) if form.dirty());
+        let dirty = matches!(&self.mode, Mode::Settings(form) if form.dirty());
         if dirty {
             self.popup = Some(Popup::confirm(
                 "Discard changes?",
@@ -652,7 +685,7 @@ impl App {
         self.mode = if self.config_returns_to_task && self.active_task.is_some() {
             Mode::Task
         } else {
-            Mode::TaskList
+            Mode::Home
         };
         if self.store.is_none() {
             self.open_store();
@@ -661,12 +694,30 @@ impl App {
 
     fn open_config(&mut self) {
         self.config_returns_to_task = matches!(self.mode, Mode::Task);
-        self.mode = Mode::Config(ConfigForm::new(&self.config, false));
+        self.mode = Mode::Settings(ConfigForm::new(&self.config, false));
     }
 
     // ----- task list ---------------------------------------------------------------
 
     fn handle_list_key(&mut self, key: KeyEvent) {
+        if self.home_focus == HomeFocus::Today && !self.filter_typing {
+            if self.handle_today_key(key) {
+                return;
+            }
+            // Only Home-wide keys reach the board from the Today pane.
+            let home_wide = matches!(
+                (key.code, key.modifiers),
+                (KeyCode::Esc | KeyCode::F(5), _)
+                    | (KeyCode::Char('c'), KeyModifiers::CONTROL)
+                    | (
+                        KeyCode::Char('q' | '?' | ',' | 'p' | 'n' | 'm' | 'M' | 'O' | 'r'),
+                        KeyModifiers::NONE | KeyModifiers::SHIFT
+                    )
+            );
+            if !home_wide {
+                return;
+            }
+        }
         let selected = self.selected_task_id();
         let filter_before = (self.list_filter.clone(), self.show_archived);
         self.list_key(key);
@@ -717,6 +768,14 @@ impl App {
             }
             (KeyCode::Char('?'), _) => self.open_help(HelpTopic::Keys),
             (KeyCode::Char(','), _) => self.open_config(),
+            (KeyCode::Char('p'), KeyModifiers::NONE) => self.run_action(Action::PlanDay),
+            (KeyCode::Tab | KeyCode::BackTab, _) => {
+                if self.plan.is_empty() {
+                    self.set_status("no plan for today yet · p plans the day");
+                } else {
+                    self.home_focus = HomeFocus::Today;
+                }
+            }
             (KeyCode::Char('/'), _) => {
                 self.filter_typing = true;
                 self.set_status(
@@ -1089,7 +1148,7 @@ impl App {
 
     fn back_to_list(&mut self) {
         let was_in_task = matches!(self.mode, Mode::Task);
-        self.mode = Mode::TaskList;
+        self.mode = Mode::Home;
         if let Some(id) = self.active_task.clone() {
             self.select_task_row(&id);
             if was_in_task {
@@ -1156,6 +1215,12 @@ impl App {
     fn run_action(&mut self, action: Action) {
         match action {
             Action::TaskList => self.back_to_list(),
+            Action::PlanDay => {
+                if matches!(self.mode, Mode::Task) {
+                    self.back_to_list();
+                }
+                self.open_plan();
+            }
             Action::Config => self.open_config(),
             Action::Quit => self.request_quit(),
             Action::NewTask => self.start_new_task(),
@@ -1594,7 +1659,7 @@ impl App {
 
     fn handle_task_key(&mut self, key: KeyEvent) {
         let Some(focus) = self.active_context().map(|c| c.focus) else {
-            self.mode = Mode::TaskList;
+            self.mode = Mode::Home;
             return;
         };
         // Pane navigation works from every pane, including the terminal.
@@ -2757,6 +2822,13 @@ impl App {
             }
             Pending::EditPrompt(kind) => self.edit_prompt(kind),
             Pending::TimerStart(id) => self.start_timer(&id, None),
+            Pending::PlanDiscard => self.mode = Mode::Home,
+            Pending::PlanAdd(task) => {
+                if let Some(text) = input {
+                    self.plan_add(task, &text);
+                }
+            }
+            Pending::PlanStart(i) => self.start_plan_item(i),
             Pending::StartFocusAsk(id) => {
                 self.popup = Some(Popup::input(
                     "Focus block",

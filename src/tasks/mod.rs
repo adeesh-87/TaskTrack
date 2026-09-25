@@ -24,6 +24,7 @@ pub mod checkpoints;
 pub mod context;
 pub mod ledger;
 pub mod merge;
+pub mod plan;
 pub mod record;
 pub mod sections;
 pub mod sources;

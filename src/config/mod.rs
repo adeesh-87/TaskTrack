@@ -234,6 +234,26 @@ impl Default for TimerConfig {
     }
 }
 
+/// Day planner (the Plan view and the Today pane on Home).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(default)]
+pub struct PlannerConfig {
+    /// Minutes of planned work that fit in a day.
+    pub day_minutes: u64,
+    /// Columns whose tasks the Plan view offers. Empty: every column except
+    /// the last, and except the first when there are three or more.
+    pub columns: Vec<String>,
+}
+
+impl Default for PlannerConfig {
+    fn default() -> Self {
+        Self {
+            day_minutes: 360,
+            columns: Vec::new(),
+        }
+    }
+}
+
 /// The persisted configuration.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(default)]
@@ -305,6 +325,8 @@ pub struct Config {
     pub coding_agent: CodingAgentConfig,
     /// Checkpoint timer.
     pub timer: TimerConfig,
+    /// Day planner.
+    pub planner: PlannerConfig,
 }
 
 impl Default for Config {
@@ -341,6 +363,7 @@ impl Default for Config {
             agent: AgentConfig::default(),
             coding_agent: CodingAgentConfig::default(),
             timer: TimerConfig::default(),
+            planner: PlannerConfig::default(),
         }
     }
 }

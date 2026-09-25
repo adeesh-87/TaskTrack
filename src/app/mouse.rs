@@ -38,8 +38,12 @@ impl App {
             return;
         }
         match self.mode {
-            Mode::Config(_) => self.mouse_config(m),
-            Mode::TaskList => self.mouse_list(m),
+            Mode::Settings(_) => self.mouse_config(m),
+            Mode::Home if self.ui.today.contains(Position::new(m.column, m.row)) => {
+                self.mouse_today(m);
+            }
+            Mode::Home => self.mouse_list(m),
+            Mode::Plan(_) => self.mouse_plan(m),
             Mode::Task => self.mouse_task(m),
         }
     }
@@ -70,7 +74,7 @@ impl App {
     }
 
     fn mouse_config(&mut self, m: MouseEvent) {
-        let Mode::Config(form) = &mut self.mode else {
+        let Mode::Settings(form) = &mut self.mode else {
             return;
         };
         match m.kind {
@@ -89,7 +93,7 @@ impl App {
                     }
                     form.select(idx);
                     if self.is_double_click(m) {
-                        if let Mode::Config(form) = &mut self.mode {
+                        if let Mode::Settings(form) = &mut self.mode {
                             form.handle_nav_key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE));
                         }
                     }
@@ -99,7 +103,96 @@ impl App {
         }
     }
 
+    /// Today pane: click selects a plan item, double-click starts its timer.
+    fn mouse_today(&mut self, m: MouseEvent) {
+        let n = self.plan.len();
+        match m.kind {
+            MouseEventKind::ScrollUp if n > 0 => {
+                self.today_selected = self.today_selected.saturating_sub(1);
+            }
+            MouseEventKind::ScrollDown if n > 0 => {
+                self.today_selected = (self.today_selected + 1).min(n - 1);
+            }
+            MouseEventKind::Down(MouseButton::Left) => {
+                let hit = self
+                    .ui
+                    .today_items
+                    .iter()
+                    .find(|(y, _)| *y == m.row)
+                    .map(|(_, i)| *i);
+                if n > 0 {
+                    self.home_focus = super::HomeFocus::Today;
+                }
+                if let Some(i) = hit {
+                    self.today_selected = i;
+                    if self.is_double_click(m) {
+                        self.start_plan_item(i);
+                    }
+                }
+            }
+            _ => {}
+        }
+    }
+
+    /// Plan view: click selects (and focuses that side), double-click picks
+    /// or removes; the wheel moves the selection.
+    fn mouse_plan(&mut self, m: MouseEvent) {
+        let pos = Position::new(m.column, m.row);
+        let in_pick = self.ui.plan_pick.contains(pos);
+        let in_order = self.ui.plan_order.contains(pos);
+        let row = if in_pick {
+            UiState::list_row(self.ui.plan_pick, &self.ui.plan_pick_state, m.column, m.row)
+        } else if in_order {
+            UiState::list_row(
+                self.ui.plan_order,
+                &self.ui.plan_order_state,
+                m.column,
+                m.row,
+            )
+        } else {
+            return;
+        };
+        let double =
+            matches!(m.kind, MouseEventKind::Down(MouseButton::Left)) && self.is_double_click(m);
+        let Mode::Plan(view) = &mut self.mode else {
+            return;
+        };
+        view.focus = if in_pick {
+            super::PlanFocus::Pick
+        } else {
+            super::PlanFocus::Order
+        };
+        match m.kind {
+            MouseEventKind::ScrollUp => view.move_cursor(-1),
+            MouseEventKind::ScrollDown => view.move_cursor(1),
+            MouseEventKind::Down(MouseButton::Left) => {
+                let Some(i) = row else { return };
+                if in_pick {
+                    if !matches!(
+                        view.rows.get(i),
+                        Some(super::PlanRow::Task(..) | super::PlanRow::Item(_))
+                    ) {
+                        return;
+                    }
+                    view.cursor = i;
+                    if double {
+                        view.toggle();
+                    }
+                } else if i < view.picked.len() {
+                    view.order_cursor = i;
+                    if double {
+                        view.remove_picked();
+                    }
+                }
+            }
+            _ => {}
+        }
+    }
+
     fn mouse_list(&mut self, m: MouseEvent) {
+        if matches!(m.kind, MouseEventKind::Down(_)) {
+            self.home_focus = super::HomeFocus::Board;
+        }
         let rows = self.rows();
         match m.kind {
             MouseEventKind::ScrollUp => self.move_list(-1, &rows),

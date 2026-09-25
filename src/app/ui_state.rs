@@ -36,6 +36,18 @@ pub struct UiState {
     pub timer_chip: Rect,
     /// With soft wrap: (buffer line, first display column) of each editor row.
     pub editor_rows: Vec<(usize, usize)>,
+    /// Today pane on Home (inside the border).
+    pub today: Rect,
+    /// Screen row of each plan item in the Today pane: (y, item index).
+    pub today_items: Vec<(u16, usize)>,
+    /// Plan view: left list block (with border).
+    pub plan_pick: Rect,
+    /// Scroll state of the Plan view's left list.
+    pub plan_pick_state: ListState,
+    /// Plan view: right list block (with border).
+    pub plan_order: Rect,
+    /// Scroll state of the Plan view's right list.
+    pub plan_order_state: ListState,
 }
 
 impl UiState {
@@ -49,6 +61,10 @@ impl UiState {
         self.config_rows = Rect::default();
         self.timer_chip = Rect::default();
         self.editor_rows.clear();
+        self.today = Rect::default();
+        self.today_items.clear();
+        self.plan_pick = Rect::default();
+        self.plan_order = Rect::default();
     }
 
     /// Row index of a click inside a bordered list, if any.

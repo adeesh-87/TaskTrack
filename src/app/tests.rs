@@ -227,9 +227,9 @@ fn mouse_on_settings_page_selects_rows() {
     h.press(key(KeyCode::Char(',')));
     h.app.ui.config_rows = Rect::new(1, 1, 80, 20);
     h.mouse(click(5, 3));
-    assert!(matches!(h.app.mode(), Mode::Config(f) if f.selected() == 2));
+    assert!(matches!(h.app.mode(), Mode::Settings(f) if f.selected() == 2));
     h.mouse(wheel(5, 3, true));
-    assert!(matches!(h.app.mode(), Mode::Config(f) if f.selected() == 3));
+    assert!(matches!(h.app.mode(), Mode::Settings(f) if f.selected() == 3));
 }
 
 fn selected_task(app: &App) -> Option<String> {
@@ -242,27 +242,27 @@ fn selected_task(app: &App) -> Option<String> {
 #[test]
 fn first_run_opens_config_and_saving_opens_board() {
     let mut h = Harness::new(false);
-    assert!(matches!(h.app.mode(), Mode::Config(f) if f.first_run()));
+    assert!(matches!(h.app.mode(), Mode::Settings(f) if f.first_run()));
     h.press(key(KeyCode::Esc));
-    assert!(matches!(h.app.mode(), Mode::Config(_)));
+    assert!(matches!(h.app.mode(), Mode::Settings(_)));
     h.press(ctrl('s'));
-    assert!(matches!(h.app.mode(), Mode::Config(f) if !f.errors().is_empty()));
+    assert!(matches!(h.app.mode(), Mode::Settings(f) if !f.errors().is_empty()));
     h.press(key(KeyCode::Enter));
     let path = h.tasks.display().to_string();
     h.type_str(&path);
     h.press(key(KeyCode::Enter));
     h.press(ctrl('s'));
-    assert!(matches!(h.app.mode(), Mode::Config(f) if f.errors().is_empty() && !f.first_run()));
+    assert!(matches!(h.app.mode(), Mode::Settings(f) if f.errors().is_empty() && !f.first_run()));
     assert!(h.app.store().is_some());
     h.press(key(KeyCode::Esc));
-    assert!(matches!(h.app.mode(), Mode::TaskList));
+    assert!(matches!(h.app.mode(), Mode::Home));
     assert!(h.app.config_path().is_file());
 }
 
 #[test]
 fn list_navigation_and_moving_tasks() {
     let mut h = Harness::new(true);
-    assert!(matches!(h.app.mode(), Mode::TaskList));
+    assert!(matches!(h.app.mode(), Mode::Home));
     assert_eq!(selected_task(&h.app).as_deref(), Some("alpha"));
     h.press(key(KeyCode::Down));
     assert_eq!(selected_task(&h.app).as_deref(), Some("beta"));
@@ -285,26 +285,26 @@ fn escape_palette_commands() {
     h.press(key(KeyCode::Esc));
     assert!(matches!(h.app.popup(), Some(Popup::Palette(_))));
     h.press(key(KeyCode::Char('c')));
-    assert!(matches!(h.app.mode(), Mode::Config(_)));
+    assert!(matches!(h.app.mode(), Mode::Settings(_)));
     h.press(key(KeyCode::Esc));
-    assert!(matches!(h.app.mode(), Mode::TaskList));
+    assert!(matches!(h.app.mode(), Mode::Home));
     // Inside a task: Esc → c → Esc comes back to the task; Esc → T returns to the list.
     h.press(key(KeyCode::Enter));
     assert!(matches!(h.app.mode(), Mode::Task));
     h.press(key(KeyCode::Esc));
     h.press(key(KeyCode::Char('c')));
-    assert!(matches!(h.app.mode(), Mode::Config(_)));
+    assert!(matches!(h.app.mode(), Mode::Settings(_)));
     h.press(key(KeyCode::Esc));
     assert!(matches!(h.app.mode(), Mode::Task));
     h.press(key(KeyCode::Esc));
     h.press(key(KeyCode::Char('T')));
-    assert!(matches!(h.app.mode(), Mode::TaskList));
+    assert!(matches!(h.app.mode(), Mode::Home));
     h.press(key(KeyCode::Enter));
     h.press(key(KeyCode::Esc));
     h.press(key(KeyCode::Char(':')));
-    h.type_str("task list");
+    h.type_str("home");
     h.press(key(KeyCode::Enter));
-    assert!(matches!(h.app.mode(), Mode::TaskList));
+    assert!(matches!(h.app.mode(), Mode::Home));
     // Esc → q quits.
     h.press(key(KeyCode::Esc));
     h.press(key(KeyCode::Char('q')));
@@ -742,7 +742,7 @@ fn delete_task_moves_it_to_trash() {
     h.press(key(KeyCode::Esc));
     h.press(key(KeyCode::Char('D')));
     h.press(key(KeyCode::Char('y')));
-    assert!(matches!(h.app.mode(), Mode::TaskList));
+    assert!(matches!(h.app.mode(), Mode::Home));
     assert!(!h.tasks.join("beta").exists());
 }
 
@@ -1113,7 +1113,7 @@ fn settings_help_and_source_test_run() {
         }];
     });
     h.press(key(KeyCode::Char(',')));
-    let Mode::Config(form) = &mut h.app.mode else {
+    let Mode::Settings(form) = &mut h.app.mode else {
         panic!()
     };
     let idx = form
@@ -1152,7 +1152,7 @@ fn task_enter_hook_runs_before_the_task_view_and_others_get_env() {
     });
     h.press(key(KeyCode::Enter));
     // The view is not shown until the hook finished.
-    assert!(matches!(h.app.mode(), Mode::TaskList));
+    assert!(matches!(h.app.mode(), Mode::Home));
     assert!(matches!(
         h.app.popup(),
         Some(Popup::Log { done: false, .. })
@@ -1351,7 +1351,7 @@ fn shells_are_restored_after_a_restart() {
             .is_some_and(|c| c == scripts)
     }));
     h.restart();
-    assert!(matches!(h.app.mode(), Mode::TaskList));
+    assert!(matches!(h.app.mode(), Mode::Home));
     h.press(key(KeyCode::Enter));
     assert_eq!(h.ctx().shells.len(), 1);
     assert!(h.pump_until(|app| {
@@ -1536,4 +1536,314 @@ fn mouse_drag_and_multi_click_select_in_the_editor() {
     assert_eq!(editor_selection(&h).as_deref(), Some("second"));
     h.mouse(at(MouseEventKind::Down(left), 1, 2));
     assert_eq!(editor_selection(&h).as_deref(), Some("second line\n"));
+}
+
+const BETA_CHECKPOINTS: &str = "# beta\n\n## Checkpoints\n<!-- pahiri:checkpoints -->\n- [x] Old step (10m)\n- [ ] Read spec (30m)\n- [ ] Write parser (2h)\n<!-- /pahiri:checkpoints -->\n";
+const ALPHA_CHECKPOINTS: &str = "# alpha\n\n## Checkpoints\n<!-- pahiri:checkpoints -->\n- [ ] Draft (20m)\n<!-- /pahiri:checkpoints -->\n";
+
+fn plan_view(app: &App) -> &PlanView {
+    match app.mode() {
+        Mode::Plan(v) => v,
+        _ => panic!("not in the Plan view"),
+    }
+}
+
+fn today_plan_file(h: &Harness) -> String {
+    let date = App::today_date();
+    fs::read_to_string(crate::tasks::plan::path(&h.tasks, &date)).unwrap_or_default()
+}
+
+#[test]
+fn plan_view_picks_suggests_orders_and_saves() {
+    let mut h = Harness::build(true, |cfg| {
+        cfg.planner.day_minutes = 100;
+        cfg.hooks.insert(
+            "plan_save".into(),
+            "echo $PAHIRI_PLAN_ITEMS > saved.txt".into(),
+        );
+        fs::write(cfg.tasks_dir.join("beta/CONTEXT.md"), BETA_CHECKPOINTS).unwrap();
+        fs::write(cfg.tasks_dir.join("alpha/CONTEXT.md"), ALPHA_CHECKPOINTS).unwrap();
+    });
+    h.press(key(KeyCode::Char('p')));
+    let v = plan_view(&h.app);
+    // Only Doing (the middle column) is offered; done checkpoints are not.
+    assert!(
+        v.rows.contains(&PlanRow::Section("DOING".into())),
+        "{:?}",
+        v.rows
+    );
+    assert!(!v
+        .rows
+        .iter()
+        .any(|r| matches!(r, PlanRow::Task(id, _) if id == "alpha")));
+    let titles: Vec<&str> = v
+        .rows
+        .iter()
+        .filter_map(|r| match r {
+            PlanRow::Item(i) => Some(i.title.as_str()),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(titles, ["Read spec", "Write parser"]);
+    // Suggest fills up to the capacity (100 min): the 2h step does not fit.
+    h.press(key(KeyCode::Char('s')));
+    let v = plan_view(&h.app);
+    assert_eq!(v.picked.len(), 1);
+    assert_eq!(v.picked[0].title, "Read spec");
+    // A shows every open column; pick alpha's checkpoint with Space.
+    h.press(key(KeyCode::Char('A')));
+    let v = plan_view(&h.app);
+    let draft = v
+        .rows
+        .iter()
+        .position(|r| matches!(r, PlanRow::Item(i) if i.title == "Draft"))
+        .unwrap();
+    while plan_view(&h.app).cursor < draft {
+        h.press(key(KeyCode::Down));
+    }
+    h.press(key(KeyCode::Char(' ')));
+    assert_eq!(plan_view(&h.app).picked.len(), 2);
+    // A free item, then order: Draft first.
+    h.press(key(KeyCode::Char('a')));
+    h.type_str("Email the vendor 15m");
+    h.press(key(KeyCode::Enter));
+    assert_eq!(plan_view(&h.app).focus, PlanFocus::Order);
+    h.press(key(KeyCode::Up));
+    h.press(key(KeyCode::Char('K')));
+    let v = plan_view(&h.app);
+    let order: Vec<&str> = v.picked.iter().map(|i| i.title.as_str()).collect();
+    assert_eq!(order, ["Draft", "Read spec", "Email the vendor"]);
+    assert_eq!(v.planned_min(), 20 + 30 + 15);
+    // Enter saves and shows the plan on Home.
+    h.press(key(KeyCode::Enter));
+    assert!(matches!(h.app.mode(), Mode::Home));
+    assert_eq!(h.app.home_focus(), HomeFocus::Today);
+    let file = today_plan_file(&h);
+    assert!(
+        file.contains(
+            "- [ ] alpha · Draft (20m)\n- [ ] beta · Read spec (30m)\n- [ ] Email the vendor (15m)\n"
+        ),
+        "{file}"
+    );
+    let saved = h.tasks.join("saved.txt");
+    assert!(h.pump_until(|_| fs::read_to_string(&saved).is_ok_and(|s| s.trim() == "3")));
+    // Esc in the Plan view with changes asks first.
+    h.press(key(KeyCode::Char('p')));
+    h.press(key(KeyCode::Char('s')));
+    h.press(key(KeyCode::Esc));
+    assert!(popup_title(&h.app).contains("Discard"));
+    h.press(key(KeyCode::Char('y')));
+    assert!(matches!(h.app.mode(), Mode::Home));
+    assert!(
+        today_plan_file(&h).contains("alpha · Draft"),
+        "discarding kept the file"
+    );
+}
+
+#[test]
+fn today_pane_runs_the_plan_and_the_timer_follows_it() {
+    let mut h = Harness::build(true, |cfg| {
+        fs::write(cfg.tasks_dir.join("beta/CONTEXT.md"), BETA_CHECKPOINTS).unwrap();
+        fs::write(cfg.tasks_dir.join("alpha/CONTEXT.md"), ALPHA_CHECKPOINTS).unwrap();
+        let date = App::today_date();
+        let items: Vec<_> = [
+            "- [ ] beta · Read spec (30m)",
+            "- [ ] alpha · Draft (20m)",
+            "- [ ] beta · Reply to review (10m)",
+            "- [ ] Email the vendor (15m)",
+        ]
+        .iter()
+        .map(|l| crate::tasks::plan::PlanItem::parse(l).unwrap())
+        .collect();
+        crate::tasks::plan::write(
+            &crate::tasks::plan::path(&cfg.tasks_dir, &date),
+            &date,
+            &items,
+        )
+        .unwrap();
+    });
+    assert_eq!(h.app.day_plan().len(), 4);
+    h.press(key(KeyCode::Tab));
+    assert_eq!(h.app.home_focus(), HomeFocus::Today);
+    // Enter starts the timer on the selected checkpoint.
+    h.press(key(KeyCode::Enter));
+    let t = h.app.timer().unwrap();
+    assert_eq!((t.task_id.as_str(), t.what()), ("beta", "Read spec"));
+    // Space on the timed item ticks it and moves on to the plan's next item,
+    // which is in another task.
+    h.press(key(KeyCode::Char(' ')));
+    assert!(h.context_md("beta").contains("- [x] Read spec"));
+    let t = h.app.timer().unwrap();
+    assert_eq!((t.task_id.as_str(), t.what()), ("alpha", "Draft"));
+    assert!(today_plan_file(&h).contains("- [x] beta · Read spec"));
+    // Done → next from the timer menu follows the plan too: a task item that is
+    // not a checkpoint gets a timer of its estimate and is ticked in the plan.
+    h.press(key(KeyCode::Char('m')));
+    h.choose("done → next: beta · Reply to review");
+    let t = h.app.timer().unwrap();
+    assert_eq!((t.task_id.as_str(), t.what()), ("beta", "Reply to review"));
+    assert_eq!(t.budget, Duration::from_secs(10 * 60));
+    h.press(key(KeyCode::Char('M')));
+    // The free item: Enter explains, Space ticks it in the plan file.
+    h.press(key(KeyCode::Char('G')));
+    h.press(key(KeyCode::Enter));
+    assert!(h.app.status().unwrap_or("").contains("free item"));
+    h.press(key(KeyCode::Char(' ')));
+    assert!(today_plan_file(&h).contains("- [x] Email the vendor (15m)"));
+    // J/K reorder, x removes.
+    h.press(key(KeyCode::Char('K')));
+    let order: Vec<String> = h.app.day_plan().iter().map(|i| i.title.clone()).collect();
+    assert_eq!(
+        order,
+        ["Read spec", "Draft", "Email the vendor", "Reply to review"]
+    );
+    h.press(key(KeyCode::Char('x')));
+    assert_eq!(h.app.day_plan().len(), 3);
+    assert!(!today_plan_file(&h).contains("Email the vendor"));
+    // o opens the selected item's task.
+    h.press(key(KeyCode::Char('g')));
+    h.press(key(KeyCode::Char('o')));
+    assert!(h.pump_until(|app| matches!(app.mode(), Mode::Task)));
+    assert_eq!(h.app.active_task(), Some("beta"));
+    h.app.shutdown();
+}
+
+#[test]
+fn yesterday_carries_over_and_day_start_fires_once() {
+    let mut h = Harness::build(true, |cfg| {
+        cfg.hooks.insert(
+            "day_start".into(),
+            "echo \"$PAHIRI_CARRIED $PAHIRI_DATE\" >> days.txt".into(),
+        );
+        fs::write(cfg.tasks_dir.join("beta/CONTEXT.md"), BETA_CHECKPOINTS).unwrap();
+        let yesterday = crate::tasks::plan::local_date(
+            crate::time::now_secs() - 86_400,
+            crate::time::local_offset_secs(),
+        );
+        let items: Vec<_> = [
+            "- [ ] beta · Read spec (30m)",
+            "- [ ] beta · Old step (10m)",
+            "- [ ] gone · Something (10m)",
+            "- [x] Call Alice (5m)",
+        ]
+        .iter()
+        .map(|l| crate::tasks::plan::PlanItem::parse(l).unwrap())
+        .collect();
+        crate::tasks::plan::write(
+            &crate::tasks::plan::path(&cfg.tasks_dir, &yesterday),
+            &yesterday,
+            &items,
+        )
+        .unwrap();
+    });
+    // Only the open item of an existing task carries over ("Old step" is ticked
+    // in CONTEXT.md, "gone" is not a task, the call is done).
+    let (_, n) = h.app.carry_hint().cloned().unwrap();
+    assert_eq!(n, 1);
+    let days = h.tasks.join("days.txt");
+    let today = App::today_date();
+    assert!(h.pump_until(|_| {
+        fs::read_to_string(&days).is_ok_and(|s| s.trim() == format!("1 {today}"))
+    }));
+    h.restart();
+    h.watch();
+    std::thread::sleep(Duration::from_millis(300));
+    h.pump_until(|app| app.hooks_running() == 0);
+    assert_eq!(
+        fs::read_to_string(&days).unwrap().lines().count(),
+        1,
+        "day_start fires once a day"
+    );
+    // The Plan view starts from the carried item; Enter saves it for today.
+    h.press(key(KeyCode::Char('p')));
+    let v = plan_view(&h.app);
+    assert!(v.dirty);
+    assert_eq!(v.picked.len(), 1);
+    assert!(matches!(&v.rows[0], PlanRow::Section(s) if s.starts_with("CARRIED OVER")));
+    h.press(key(KeyCode::Enter));
+    assert!(today_plan_file(&h).contains("- [ ] beta · Read spec (30m)"));
+    assert!(h.app.carry_hint().is_none());
+}
+
+#[test]
+fn plan_changes_on_disk_show_up() {
+    let mut h = Harness::new(true);
+    assert!(h.app.day_plan().is_empty());
+    let date = App::today_date();
+    let path = crate::tasks::plan::path(&h.tasks, &date);
+    crate::tasks::plan::write(
+        &path,
+        &date,
+        &[crate::tasks::plan::PlanItem::free("From a script 10m", 30).unwrap()],
+    )
+    .unwrap();
+    h.watch();
+    assert_eq!(h.app.day_plan().len(), 1);
+    assert_eq!(h.app.day_plan()[0].title, "From a script");
+}
+
+#[test]
+fn mouse_and_timer_menu_work_on_the_plan() {
+    let mut h = Harness::build(true, |cfg| {
+        fs::write(cfg.tasks_dir.join("beta/CONTEXT.md"), BETA_CHECKPOINTS).unwrap();
+        let date = App::today_date();
+        let items: Vec<_> = [
+            "- [ ] beta · Read spec (30m)",
+            "- [ ] beta · Write parser (2h)",
+        ]
+        .iter()
+        .map(|l| crate::tasks::plan::PlanItem::parse(l).unwrap())
+        .collect();
+        crate::tasks::plan::write(
+            &crate::tasks::plan::path(&cfg.tasks_dir, &date),
+            &date,
+            &items,
+        )
+        .unwrap();
+    });
+    // Pretend the Today pane was drawn with the items on rows 3 and 4.
+    h.app.ui.today = Rect::new(24, 1, 60, 20);
+    h.app.ui.today_items = vec![(3, 0), (4, 1)];
+    h.mouse(click(30, 4));
+    assert_eq!(h.app.home_focus(), HomeFocus::Today);
+    assert_eq!(h.app.today_selected(), 1);
+    // The timer menu offers the selected plan item first.
+    h.press(key(KeyCode::Char('m')));
+    h.choose("start: beta · Write parser");
+    assert_eq!(h.app.timer().unwrap().what(), "Write parser");
+    h.press(key(KeyCode::Char('M')));
+    // Double-click starts the timer on the clicked item.
+    h.mouse(click(30, 3));
+    h.mouse(click(30, 3));
+    assert_eq!(h.app.timer().unwrap().what(), "Read spec");
+    // A click on the board gives it the keys back.
+    h.app.ui.task_list = Rect::new(0, 0, 22, 20);
+    h.mouse(click(3, 4));
+    assert_eq!(h.app.home_focus(), HomeFocus::Board);
+
+    // Plan view: click selects, double-click picks / removes.
+    h.press(key(KeyCode::Char('p')));
+    h.app.ui.plan_pick = Rect::new(0, 2, 50, 20);
+    h.app.ui.plan_order = Rect::new(50, 2, 50, 20);
+    let write = plan_view(&h.app)
+        .rows
+        .iter()
+        .position(|r| matches!(r, PlanRow::Item(i) if i.title == "Write parser"))
+        .unwrap() as u16;
+    h.mouse(click(0, 3));
+    h.mouse(click(10, 3 + write));
+    assert_eq!(plan_view(&h.app).cursor, write as usize);
+    h.mouse(click(10, 3 + write));
+    assert_eq!(
+        plan_view(&h.app).picked.len(),
+        1,
+        "double-click unpicked it"
+    );
+    h.mouse(click(60, 3));
+    h.mouse(click(60, 3));
+    assert!(
+        plan_view(&h.app).picked.is_empty(),
+        "double-click on the right removes"
+    );
+    h.app.shutdown();
 }

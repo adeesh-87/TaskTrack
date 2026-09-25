@@ -78,6 +78,12 @@ pub enum Pending {
     RefreshDescription(String, String),
     /// Search the editor for the entered text.
     Find,
+    /// Leave the Plan view without saving.
+    PlanDiscard,
+    /// Stop the timer and start it on plan item N.
+    PlanStart(usize),
+    /// Add the entered text to the plan (for this task, or a free item).
+    PlanAdd(Option<String>),
     /// Nothing (used by cancel options).
     Nothing,
 }

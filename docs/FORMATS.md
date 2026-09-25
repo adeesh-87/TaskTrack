@@ -54,6 +54,26 @@ Durations: `40m`, `1h`, `1h30m`, `1.5h`, `90 min`, `2 hours`, `45`.
 One line per booking: `2026-09-24T10:05:00Z<TAB>PROJ-42<TAB>7<TAB>Read the spec`
 (UTC time, task, minutes, checkpoint or `focus block`). Append-only.
 
+## Day plan (`<tasks>/.pahiri/plans/YYYY-MM-DD.md`)
+
+```markdown
+# Plan 2026-09-25
+
+## Plan
+<!-- pahiri:plan -->
+- [x] PROJ-42 · Read the spec (20m)      ← a checkpoint of PROJ-42 (matched by title)
+- [ ] PROJ-42 · Reply to review (20m)    ← a task item: not a checkpoint, timed on PROJ-42
+- [ ] Email the vendor (15m)             ← a free item
+<!-- /pahiri:plan -->
+
+## Notes                                 ← yours
+```
+
+Order = plan order. A checkpoint's `[x]` mirrors its `CONTEXT.md`
+(ticking either updates both); other items keep their own `[x]`. Only the
+text between the markers is rewritten. `pahiri plan show|add` read and
+append.
+
 ## `session.json` (state folder)
 
 The timer (`task_id`, `checkpoint`, `budget_secs`, `elapsed_secs`,
@@ -116,5 +136,7 @@ pahiri task move [--task ID] --to COL   move on the board, record dates
 pahiri task outcome [--task ID] <text…> append to ## Outcome
 pahiri trash empty [--older-than 30d]   delete old trashed tasks
 pahiri report [--from D] [--to D] [--json]   tasks active in the range
+pahiri plan show [--date D] [--json]    day plan with each item's state
+pahiri plan add [--task ID] [--date D] <text [20m]>   add to the plan
 pahiri install-skills <DIR> [--force]   write bundled skills to DIR/<name>/SKILL.md
 ```

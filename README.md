@@ -18,6 +18,19 @@ board, with a vim-style command palette on `Esc`.
 └──────────────┘└────────────────────┘└───────────────────────────────────────────┘
 ```
 
+## Views
+
+| view | what | how |
+| ---- | ---- | --- |
+| **Home** | the **Board** (columns of tasks, left) and the **Today** pane (your plan for the day, what is timed, time booked, open work) | start, `Esc T` |
+| **Plan** | choose today's work: pick checkpoints of the tasks in progress, order them | `p` on Home, `Esc y` anywhere |
+| **Task** | one task: Files, Editor, Shells and Terminal panes | `Enter` on a task |
+| **Settings** | the settings form | `Esc c`, `,` on Home |
+| **Help** | an overlay on any view | `F1`, `?` |
+
+Also named: the **Palette** (`Esc`), the **Leader** key (`Ctrl+B`), the
+**Timer chip** (bottom right) and its **Timer menu**.
+
 ## Concepts
 
 * **Task** — a folder `tasks/<task_id>/` with at least a `CONTEXT.md`, plus
@@ -67,7 +80,8 @@ filter, `Enter` to run, `Esc` to close.
 | `F` | find in the editor (F3 / Ctrl+G: next) |
 | `E` | edit the AI prompt templates |
 | `D` | delete the task (moved to `.trash`) |
-| `T` | back to the task list |
+| `T` | back to Home |
+| `y` | plan your day (the Plan view; `p` on Home) |
 | `p` | **prepare**: commit, pull main, switch attached repos to the task branch |
 | `a` | **attach** code workspaces / vendor builds to the task |
 | `s` / `x` | new shell / close selected shell |
@@ -189,10 +203,39 @@ troubleshooting. `?` on a setting opens the matching tab.
 
 pahiri's job is that you always know what to do next.
 
-* **Next up / Today.** The task list's right side shows the time booked
-  today and this week, what you finished, your estimate factor (spent ÷
-  estimated), and each open task's next checkpoint (or what it is
-  missing: a context, a plan). `J`/`K` reorder tasks within a column.
+* **Plan the day.** `p` on Home opens the Plan view:
+
+  ```
+   Plan · Fri 25 Sep  4h35m of 6h ████████░░░░  · estimates × 1.30 (your pace)
+  ┌ What can be planned ───────────────┐┌ Today, in order ───────────────────┐
+  │ CARRIED OVER · Thu 24 Sep          ││  1. PROJ-51 · Address review  40m  │
+  │    [x] Address review  30m PROJ-51 ││  2. PROJ-42 · Write the parser 1h20m│
+  │ DOING                              ││  3. Email the vendor           15m │
+  │  PROJ-42 Fix login                 ││                                    │
+  │    [x] Write the parser  1h        ││                                    │
+  │    [ ] Write tests  45m            ││                                    │
+  └────────────────────────────────────┘└────────────────────────────────────┘
+  ```
+
+  The left side lists the open checkpoints of the tasks in progress (the
+  middle columns; setting *Plan from columns*, `A` shows every open column)
+  and yesterday's unfinished items. `Space` picks (on a task: all its
+  checkpoints), `s` suggests a day — carried-over items, then each task's
+  next checkpoint in board order, round after round, until the *Day
+  capacity* (6h) is full, with estimates scaled by your pace. `a` adds a
+  free item (`Email the vendor 15m`), `t` an item for the task under the
+  cursor. On the right, `J`/`K` order and `x` removes. `Enter` saves.
+* **Today.** Home's right side shows the plan: `Tab` moves there, `Enter`
+  starts the timer on an item, `Space` ticks it (a checkpoint is ticked in
+  its task's `CONTEXT.md` — one source of truth), `J`/`K` reorder, `x`
+  removes, `o` opens the task. **The timer's done → next follows the
+  plan**, across tasks. Below the plan: time booked today and this week,
+  your pace (spent ÷ estimated), and the open work on the board.
+* **The plan file** is `<tasks>/.pahiri/plans/<date>.md`, plain Markdown
+  you, scripts and agents can edit (`pahiri plan add`, `pahiri plan show`):
+  `- [ ] PROJ-42 · Write the parser (1h)` points at a checkpoint,
+  `- [ ] Email the vendor (15m)` is a free item. Hooks `day_start` and
+  `plan_save` run on the first start of a day and when you save a plan.
 * **Context → ready → checkpoints.** `Esc i` asks your AI agent to write a
   short `## Context` for the task (goal, background, done-when, risks,
   review notes) from `CONTEXT.md` and the attached code, capped at the word
@@ -314,6 +357,8 @@ pahiri task ready [--off]
 pahiri task move --to Done           # column name or index; records the dates
 pahiri task outcome "shipped the fix; root cause was a stale token"
 pahiri report --from 2026-01-01 --to 2026-06-30 [--json]
+pahiri plan show [--date D] [--json]  # today's plan with each item's state
+pahiri plan add [--task ID] Reply to review 20m
 pahiri trash empty --older-than 30d
 pahiri install-skills <dir> [--force]
 ```
@@ -443,6 +488,8 @@ Config: `~/.config/pahiri/config.toml`. Logs and generated shell files:
 | `timer.focus_minutes` | 25 | timer for tasks without checkpoints |
 | `timer.flash` / `timer.bell` | true / true | when time is up |
 | `timer.idle_minutes` | 15 | pause after this long without input (0: never) |
+| `planner.day_minutes` | 360 | how much planned work fits in a day (form: `6h`) |
+| `planner.columns` | [] | columns the Plan view offers; empty: all but the last, and but the first with 3+ columns |
 | `color_scheme` | `dark` | `dark`, `light`, `gruvbox`, `nord`, `solarized` |
 | `shell.program` | `zsh` | `shell.args` defaults to `["-i"]` |
 | `leader_key` | `ctrl+b` | e.g. `ctrl+a`, `ctrl+space`, `alt+x` |
@@ -467,7 +514,9 @@ one, `d` deletes. Workspaces are written as `name = /path @main-branch`
 
 | where | keys |
 | ----- | ---- |
-| task list | `↑/↓` move · `Enter` open · `J`/`K` reorder · `[`/`]` move task · `/` filter · `A` archived · `n` new · `d` delete · `m` timer · `v` checkpoint done · `O` outcome · `q` quit |
+| Home: board | `↑/↓` move · `Enter` open · `J`/`K` reorder · `[`/`]` move task · `/` filter · `A` archived · `n` new · `d` delete · `m` timer · `v` checkpoint done · `O` outcome · `p` plan · `Tab` Today · `q` quit |
+| Home: Today | `↑/↓` move · `Enter` timer · `Space` tick · `J`/`K` order · `x` remove · `o` open task · `p` plan · `Tab` board |
+| Plan | `Space` pick · `s` suggest · `a` / `t` add · `Tab` / `←→` switch sides · `J`/`K` order · `x` remove · `A` all columns · `Enter` save · `Esc` cancel |
 | files | `Enter` open/toggle · `←/→` collapse/expand · `a`/`A` new file/folder · `r` rename · `d` delete · `.` hidden · `t` shell |
 | shells | `Enter` focus · `n` new · `x` close · `←` hide pane |
 | editor | `Ctrl+S` save · `Ctrl+W` close · `Ctrl+Z`/`Ctrl+Y` undo/redo · `Ctrl+F` find · `F3`/`Ctrl+G` next · selection and clipboard: see *Editing* |

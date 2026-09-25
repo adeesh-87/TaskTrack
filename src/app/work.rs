@@ -177,6 +177,9 @@ impl App {
             .filter_map(|id| self.records.get(id).map(|(_, r)| r.clone()))
             .collect();
         self.today = self.compute_today();
+        if !self.plan.is_empty() {
+            self.sync_plan_marks();
+        }
     }
 
     fn compute_today(&self) -> Today {
@@ -261,7 +264,7 @@ impl App {
                 if let Some(id) = self.active_task.take() {
                     self.contexts.remove(&id);
                 }
-                self.mode = Mode::TaskList;
+                self.mode = Mode::Home;
             }
             self.refresh_next_up();
         }
@@ -323,7 +326,7 @@ impl App {
                 self.restore_shells.remove(id);
                 if self.active_task.as_deref() == Some(id) {
                     self.active_task = None;
-                    self.mode = Mode::TaskList;
+                    self.mode = Mode::Home;
                 }
                 self.fix_list_selection();
                 self.refresh_next_up();
@@ -493,11 +496,11 @@ impl App {
         let timed = self
             .timer
             .as_ref()
-            .filter(|t| t.checkpoint.is_some())
-            .map(|t| t.task_id.clone());
-        if let Some(id) = timed {
+            .and_then(|t| t.checkpoint.clone().map(|c| (t.task_id.clone(), c)));
+        if let Some((id, title)) = timed {
             let finished = self.book_time(true, true);
             self.timer = None;
+            self.mark_plan_item_done(&id, &title);
             if let Some(c) = &finished {
                 self.fire_hook(
                     HookEvent::CheckpointDone,
@@ -505,6 +508,14 @@ impl App {
                     Self::checkpoint_env(c),
                     AfterHook::Nothing,
                 );
+            }
+            // The day plan decides what is next, when the timed item is in it.
+            if let Some(next) = self.next_in_plan(&id, &title) {
+                let label = self.plan_item_label(next);
+                self.start_plan_item(next);
+                self.set_status(format!("next in today's plan: {label} · timer running"));
+                self.save_session();
+                return;
             }
             let Some(path) = self.context_path(&id) else {
                 return;
@@ -561,7 +572,13 @@ impl App {
         }
         if let Some(t) = &self.timer {
             title = format!("Timer · {} · {} · {}", t.task_id, t.what(), t.label(now));
-            let next = self.next_checkpoint_label(&t.task_id, t.checkpoint.as_deref());
+            let in_plan = t
+                .checkpoint
+                .as_deref()
+                .and_then(|c| self.next_in_plan(&t.task_id, c))
+                .map(|j| self.plan_item_label(j));
+            let next =
+                in_plan.or_else(|| self.next_checkpoint_label(&t.task_id, t.checkpoint.as_deref()));
             let over = t.remaining_secs(now) < 0;
             if t.is_running() {
                 if !over {
@@ -619,6 +636,16 @@ impl App {
                 return;
             };
             title = format!("Timer · {id}");
+            let planned = (matches!(self.mode, Mode::Home)
+                && self.home_focus() == super::HomeFocus::Today)
+                .then_some(self.today_selected())
+                .filter(|&i| i < self.day_plan().len());
+            if let Some(i) = planned {
+                choices.push((
+                    format!("start: {}", self.plan_item_label(i)),
+                    Pending::PlanStart(i),
+                ));
+            }
             match self.next_checkpoint_label(&id, None) {
                 Some(n) => choices.push((format!("start: {n}"), Pending::TimerStart(id.clone()))),
                 None => choices.push((
@@ -675,7 +702,7 @@ impl App {
         if let Some((i, c)) = chosen {
             let budget = Duration::from_secs(c.estimate_min.saturating_sub(c.spent_min) * 60);
             let title = c.title.clone();
-            self.begin_timer(id, Some((i, title)), budget);
+            self.begin_timer(id, Some((Some(i), title)), budget);
         } else {
             let m = self.config.timer.focus_minutes;
             self.begin_timer(id, None, Duration::from_secs(m * 60));
@@ -689,7 +716,14 @@ impl App {
         }
     }
 
-    fn begin_timer(&mut self, id: &str, checkpoint: Option<(usize, String)>, budget: Duration) {
+    /// Start timing `checkpoint` (its index, when it is one of the task's
+    /// checkpoints, and its title) or a focus block.
+    pub(super) fn begin_timer(
+        &mut self,
+        id: &str,
+        checkpoint: Option<(Option<usize>, String)>,
+        budget: Duration,
+    ) {
         if self.timer.is_some() {
             self.stop_timer();
         }
@@ -699,7 +733,7 @@ impl App {
             budget,
             Instant::now(),
         );
-        timer.checkpoint_index = checkpoint.map(|(i, _)| i);
+        timer.checkpoint_index = checkpoint.and_then(|(i, _)| i);
         let label = format!("⏱ {} · {}", timer.what(), timer.label(Instant::now()));
         self.timer = Some(timer);
         self.last_input = Instant::now();
@@ -880,6 +914,9 @@ impl App {
         if self.watched.elapsed() >= WATCH {
             self.watched = now;
             self.reload_outside_changes();
+            if self.store.is_some() {
+                self.check_day();
+            }
         }
     }
 
