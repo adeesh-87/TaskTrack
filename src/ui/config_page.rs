@@ -14,7 +14,7 @@ use super::Theme;
 /// Draw the settings page.
 pub fn draw(frame: &mut Frame<'_>, app: &mut App, area: Rect, theme: &Theme) {
     let config_path = app.config_path().display().to_string();
-    let Mode::Config(form) = app.mode() else {
+    let Mode::Settings(form) = app.mode() else {
         return;
     };
     let block = Block::bordered()

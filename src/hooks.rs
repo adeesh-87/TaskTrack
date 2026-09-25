@@ -48,6 +48,10 @@ pub enum HookEvent {
     CheckpointsGenerated,
     /// Gerrit changes were scanned.
     Gerrit,
+    /// pahiri ran for the first time on a new day.
+    DayStart,
+    /// The day plan was saved from the Plan view.
+    PlanSave,
 }
 
 /// Variables every hook gets.
@@ -77,7 +81,7 @@ pub const COMMON_ENV: &[(&str, &str)] = &[
 
 impl HookEvent {
     /// All events, in help order.
-    pub const ALL: [HookEvent; 17] = [
+    pub const ALL: [HookEvent; 19] = [
         Self::Startup,
         Self::TaskCreate,
         Self::TaskEnter,
@@ -95,6 +99,8 @@ impl HookEvent {
         Self::ContextGenerated,
         Self::CheckpointsGenerated,
         Self::Gerrit,
+        Self::DayStart,
+        Self::PlanSave,
     ];
 
     /// Name used in the config.
@@ -117,6 +123,8 @@ impl HookEvent {
             Self::ContextGenerated => "context_generated",
             Self::CheckpointsGenerated => "checkpoints_generated",
             Self::Gerrit => "gerrit",
+            Self::DayStart => "day_start",
+            Self::PlanSave => "plan_save",
         }
     }
 
@@ -147,6 +155,8 @@ impl HookEvent {
             Self::ContextGenerated => "the AI wrote the ## Context section",
             Self::CheckpointsGenerated => "the AI wrote checkpoints",
             Self::Gerrit => "Gerrit changes were scanned (Esc g)",
+            Self::DayStart => "pahiri ran for the first time today (at start or past midnight)",
+            Self::PlanSave => "the day plan was saved in the Plan view (p)",
         }
     }
 
@@ -208,6 +218,20 @@ impl HookEvent {
             Self::Gerrit => &[
                 ("PAHIRI_GERRIT_COUNT", "changes found"),
                 ("PAHIRI_GERRIT_CHANGES", "their Change-Ids, space separated"),
+            ],
+            Self::DayStart => &[
+                ("PAHIRI_DATE", "today, YYYY-MM-DD"),
+                ("PAHIRI_PLAN_FILE", "today's plan file (may not exist yet)"),
+                (
+                    "PAHIRI_CARRIED",
+                    "unfinished items in the last earlier plan",
+                ),
+            ],
+            Self::PlanSave => &[
+                ("PAHIRI_DATE", "the plan's day, YYYY-MM-DD"),
+                ("PAHIRI_PLAN_FILE", "the plan file"),
+                ("PAHIRI_PLAN_ITEMS", "number of items"),
+                ("PAHIRI_PLAN_MINUTES", "minutes planned (open items)"),
             ],
             Self::Startup | Self::Attach => &[],
         }

@@ -56,6 +56,11 @@ enum Cmd {
         #[arg(long)]
         json: bool,
     },
+    /// The day plan (<tasks>/.pahiri/plans/<date>.md) for scripts and agents.
+    Plan {
+        #[command(subcommand)]
+        cmd: PlanCmd,
+    },
     /// Manage deleted tasks in <tasks>/.trash.
     Trash {
         #[command(subcommand)]
@@ -120,6 +125,31 @@ enum TaskCmd {
 }
 
 #[derive(Debug, Subcommand)]
+enum PlanCmd {
+    /// Print the plan with each item's state.
+    Show {
+        /// Day, YYYY-MM-DD (default today).
+        #[arg(long)]
+        date: Option<String>,
+        /// JSON instead of Markdown.
+        #[arg(long)]
+        json: bool,
+    },
+    /// Add an item, e.g. `pahiri plan add --task PROJ-42 Reply to review 20m`.
+    Add {
+        /// Task the item belongs to (default: a free item).
+        #[arg(long)]
+        task: Option<String>,
+        /// Day, YYYY-MM-DD (default today).
+        #[arg(long)]
+        date: Option<String>,
+        /// What, optionally ending with an estimate (20m, 1h).
+        #[arg(required = true)]
+        text: Vec<String>,
+    },
+}
+
+#[derive(Debug, Subcommand)]
 enum TrashCmd {
     /// Delete trashed tasks older than the given age.
     Empty {
@@ -155,6 +185,12 @@ fn run_command(cmd: Cmd, config: Option<&Config>, config_path: &std::path::Path)
             }
         },
         Cmd::Report { from, to, json } => cli::report(cfg, from.as_deref(), to.as_deref(), json)?,
+        Cmd::Plan { cmd } => match cmd {
+            PlanCmd::Show { date, json } => cli::plan_show(cfg, date.as_deref(), json)?,
+            PlanCmd::Add { task, date, text } => {
+                cli::plan_add(cfg, task, date.as_deref(), &text.join(" "))?
+            }
+        },
         Cmd::Trash {
             cmd: TrashCmd::Empty { older_than },
         } => cli::trash_empty(cfg, &older_than)?,

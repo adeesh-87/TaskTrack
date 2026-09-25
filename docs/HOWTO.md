@@ -16,7 +16,8 @@ Each recipe lists every place to touch. Run fmt, clippy and tests after.
 
 ## Add a direct key
 
-- Task list: `handle_list_key` in `src/app/mod.rs`.
+- Home board: `list_key` in `src/app/mod.rs`; Home's Today pane:
+  `handle_today_key`, Plan view: `handle_plan_key` (both `src/app/plan.rs`).
 - Task panes: `handle_tree_key` / `handle_editor_key` / `handle_shell_list_key`.
   Editor movement keys go through `move_in_editor` (Shift selects); editing
   operations belong on `Buffer` (`src/editor/mod.rs`) with a unit test there.

@@ -3,8 +3,10 @@
 /// Everything the palette can do.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Action {
-    /// Go to the task list.
+    /// Go to Home.
     TaskList,
+    /// Open the Plan view.
+    PlanDay,
     /// Open settings.
     Config,
     /// Quit pahiri.
@@ -79,8 +81,9 @@ pub enum Action {
 
 impl Action {
     /// Every action (for key overrides and help).
-    pub const ALL: [Action; 36] = [
+    pub const ALL: [Action; 37] = [
         Self::TaskList,
+        Self::PlanDay,
         Self::Config,
         Self::Quit,
         Self::NewTask,
@@ -122,6 +125,7 @@ impl Action {
     pub fn name(self) -> &'static str {
         match self {
             Self::TaskList => "task_list",
+            Self::PlanDay => "plan_day",
             Self::Config => "config",
             Self::Quit => "quit",
             Self::NewTask => "new_task",
@@ -189,6 +193,7 @@ pub fn list_commands() -> Vec<Command> {
             "new task (custom or from Jira/Orbit/...)",
             Action::NewTask,
         ),
+        cmd('y', "plan your day (p)", Action::PlanDay),
         cmd(
             'm',
             "timer menu (start / pause / next / stop)",
@@ -211,7 +216,8 @@ pub fn list_commands() -> Vec<Command> {
 /// Commands available inside a task.
 pub fn task_commands() -> Vec<Command> {
     vec![
-        cmd('T', "back to the task list", Action::TaskList),
+        cmd('T', "back to Home", Action::TaskList),
+        cmd('y', "plan your day", Action::PlanDay),
         cmd(
             'p',
             "prepare: commit, pull main, switch attached repos to task branch",

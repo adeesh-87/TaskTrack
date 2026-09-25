@@ -196,7 +196,7 @@ dump("back to list", "PLANNED")
 send("\x1b"); send("c", 0.8)                   # config
 dump("settings", "Code workspaces")
 send("\x1b", 0.5)
-dump("next up", "next up")
+dump("home: today pane", "No plan for today yet")
 
 # AI context → ready → checkpoints → timer → time's up (flash) → done.
 send("\r", 1.0)                                # open PROJ-42 again (terminal focused)
@@ -236,12 +236,30 @@ dump("help: hooks", "PAHIRI_PREV_TASK")
 send("q", 0.5)
 send("\x1b"); send("M", 0.5)                   # stop and book
 send("\x1b"); send("T", 0.8)
+# Plan the day: p → A (all columns: PROJ-42 is still in Planned) → s suggest → Enter.
+send("p", 0.8)
+dump("plan view", "What can be planned")
+send("A", 0.5)
+send("s", 0.5)
+dump("plan suggested", "Today, in order")
+if "PROJ-42 · Flux the capacitor" not in text():
+    failures.append("suggest did not pick the open checkpoint")
+send("\r", 0.8)
+dump("home with a plan", "Plan  0/1 done")
+send("\r", 0.8)                                # Enter on the plan item: timer
+if "⏱ PROJ-42" not in text():
+    failures.append("Enter in the Today pane did not start the timer")
+dump("timer from the plan", "▶")
+send("M", 0.5)                                 # M works from the Today pane too
 send("\x1b"); send("q", 0.5)                   # quit → confirm (shell running)
 dump("quit confirm", "Quit pahiri?")
 send("y", 1.0)
 child.expect(pexpect.EOF, timeout=5)
 print("exit status", child.exitstatus)
 ctx = open(os.path.join(tasks, "PROJ-42", "CONTEXT.md")).read()
+plans = os.path.join(tasks, ".pahiri", "plans")
+if not os.path.isdir(plans) or not os.listdir(plans):
+    failures.append("no plan file written")
 for needle in ("- [x] Tiny warm-up", "- context_ready: true", "## Log", "- started: "):
     if needle not in ctx:
         failures.append(f"CONTEXT.md lacks {needle!r}")

@@ -71,6 +71,10 @@ pub enum FieldKey {
     CodingStartInCode,
     /// Focus block minutes.
     FocusMinutes,
+    /// Planned minutes per day.
+    PlannerDay,
+    /// Columns offered for planning.
+    PlannerColumns,
     /// Flash on timer end.
     TimerFlash,
     /// Bell on timer end.
@@ -374,6 +378,18 @@ impl ConfigForm {
                 "Focus block (min)",
                 "Timer length for tasks without checkpoints.",
                 Value::Number(cfg.timer.focus_minutes.to_string()),
+            ),
+            field(
+                FieldKey::PlannerDay,
+                "Day capacity",
+                "How much planned work fits in a day, e.g. 6h or 5h30m. The Plan view fills up to this.",
+                Value::Text(crate::tasks::checkpoints::fmt_minutes(cfg.planner.day_minutes)),
+            ),
+            field(
+                FieldKey::PlannerColumns,
+                "Plan from columns",
+                "Columns whose tasks the Plan view offers (Enter on '+ add' adds, d deletes). Empty: all but the last column, and but the first when there are three or more.",
+                Value::List(cfg.planner.columns.clone()),
             ),
             field(
                 FieldKey::IdleMinutes,
@@ -941,6 +957,21 @@ impl ConfigForm {
                     Ok(n) => cfg.timer.focus_minutes = n,
                     Err(_) => errors.push(format!("focus block must be a number, got {v:?}")),
                 },
+                (FieldKey::PlannerDay, Value::Text(v)) => {
+                    match crate::tasks::checkpoints::parse_minutes(v.trim()) {
+                        Some(n) if n > 0 => cfg.planner.day_minutes = n,
+                        _ => {
+                            errors.push(format!("day capacity must be like 6h or 330m, got {v:?}"));
+                        }
+                    }
+                }
+                (FieldKey::PlannerColumns, Value::List(items)) => {
+                    cfg.planner.columns = items
+                        .iter()
+                        .map(|s| s.trim().to_owned())
+                        .filter(|s| !s.is_empty())
+                        .collect();
+                }
                 (FieldKey::TimerFlash, Value::Toggle(b)) => cfg.timer.flash = *b,
                 (FieldKey::TimerBell, Value::Toggle(b)) => cfg.timer.bell = *b,
                 (FieldKey::IdleMinutes, Value::Number(v)) => match v.trim().parse() {

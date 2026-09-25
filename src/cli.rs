@@ -14,6 +14,7 @@ use crate::tasks::checkpoints::{self, fmt_minutes};
 use crate::tasks::context::{
     append_log, append_under, record_move, set_context_ready, OUTCOME_HEADING,
 };
+use crate::tasks::plan::{self, PlanItem};
 use crate::tasks::record::TaskRecord;
 use crate::tasks::store::{discover, empty_trash, is_valid_id, TaskStore};
 use crate::tasks::Board;
@@ -238,6 +239,114 @@ pub fn report(cfg: &Config, from: Option<&str>, to: Option<&str>, json: bool) ->
     Ok(out)
 }
 
+/// The plan's day: `date`, else today (local time).
+fn plan_day(date: Option<&str>) -> Result<String> {
+    match date {
+        Some(d) => {
+            valid_date(d)?;
+            Ok(d.to_owned())
+        }
+        None => Ok(plan::local_date(
+            crate::time::now_secs(),
+            crate::time::local_offset_secs(),
+        )),
+    }
+}
+
+/// One plan item with its live state, for `pahiri plan show --json`.
+#[derive(Debug, serde::Serialize)]
+struct PlanRecord {
+    task: Option<String>,
+    title: String,
+    estimate_min: u64,
+    spent_min: u64,
+    done: bool,
+}
+
+/// `pahiri plan show [--date D] [--json]`: the day plan, with checkpoint
+/// state read from each task's `CONTEXT.md`.
+pub fn plan_show(cfg: &Config, date: Option<&str>, json: bool) -> Result<String> {
+    let day = plan_day(date)?;
+    let items = plan::read(&plan::path(&cfg.tasks_dir, &day))?;
+    let recs = records(cfg)?;
+    let rows: Vec<PlanRecord> = items
+        .into_iter()
+        .map(|i| {
+            let cp = i.task.as_ref().and_then(|t| {
+                recs.iter()
+                    .find(|r| &r.id == t)
+                    .and_then(|r| r.checkpoints.iter().find(|c| c.title == i.title))
+            });
+            PlanRecord {
+                done: cp.map_or(i.done, |c| c.done),
+                spent_min: cp.map_or(0, |c| c.spent_min),
+                task: i.task,
+                title: i.title,
+                estimate_min: i.estimate_min,
+            }
+        })
+        .collect();
+    if json {
+        return Ok(serde_json::to_string_pretty(&rows)?);
+    }
+    if rows.is_empty() {
+        return Ok(format!("no plan for {day}"));
+    }
+    let done = rows.iter().filter(|r| r.done).count();
+    let left: u64 = rows
+        .iter()
+        .filter(|r| !r.done)
+        .map(|r| r.estimate_min.saturating_sub(r.spent_min))
+        .sum();
+    let mut out = format!(
+        "Plan {} · {done}/{} done · {} left\n",
+        plan::day_label(&day),
+        rows.len(),
+        fmt_minutes(left)
+    );
+    for r in &rows {
+        let item = PlanItem {
+            task: r.task.clone(),
+            title: r.title.clone(),
+            estimate_min: r.estimate_min,
+            done: r.done,
+        };
+        out.push_str(&item.render());
+        out.push('\n');
+    }
+    Ok(out.trim_end().to_owned())
+}
+
+/// `pahiri plan add [--task ID] [--date D] <text…>`: append an item such as
+/// `Reply to review 20m` (a free item without `--task`).
+pub fn plan_add(
+    cfg: &Config,
+    task: Option<String>,
+    date: Option<&str>,
+    text: &str,
+) -> Result<String> {
+    let day = plan_day(date)?;
+    let Some(mut item) = PlanItem::free(text, 30) else {
+        bail!("nothing to add");
+    };
+    if let Some(t) = &task {
+        // A checkpoint of the task keeps its own estimate.
+        let items = checkpoints::read(&context_path(cfg, t)?)?;
+        if let Some(c) = items.iter().find(|c| c.title == item.title) {
+            item.estimate_min = c.estimate_min;
+        }
+    }
+    item.task = task;
+    let path = plan::path(&cfg.tasks_dir, &day);
+    let mut items = plan::read(&path)?;
+    if items.iter().any(|i| i.same(&item)) {
+        return Ok(format!("already planned: {}", item.render()));
+    }
+    items.push(item.clone());
+    plan::write(&path, &day, &items)?;
+    Ok(format!("added to {day}: {}", item.render()))
+}
+
 /// `pahiri install-skills <dir>`: write the bundled skills as `<dir>/<name>/SKILL.md`.
 pub fn install_skills(dir: &Path, force: bool) -> Result<String> {
     let mut out = String::new();
@@ -267,6 +376,40 @@ mod tests {
             tasks_dir: dir.to_path_buf(),
             ..Config::default()
         }
+    }
+
+    #[test]
+    fn plan_show_and_add() {
+        let dir = tempfile::tempdir().unwrap();
+        let c = cfg(dir.path());
+        fs::create_dir_all(dir.path().join("T-1")).unwrap();
+        fs::write(
+            dir.path().join("T-1/CONTEXT.md"),
+            "# T-1\n\n## Checkpoints\n<!-- pahiri:checkpoints -->\n- [x] A (10m; spent 12m)\n- [ ] B (20m; spent 5m)\n<!-- /pahiri:checkpoints -->\n",
+        )
+        .unwrap();
+        let day = Some("2026-09-25");
+        assert_eq!(plan_show(&c, day, false).unwrap(), "no plan for 2026-09-25");
+        plan_add(&c, Some("T-1".into()), day, "A").unwrap();
+        plan_add(&c, Some("T-1".into()), day, "B 20m").unwrap();
+        assert!(plan_add(&c, Some("T-1".into()), day, "B 20m")
+            .unwrap()
+            .starts_with("already planned"));
+        plan_add(&c, None, day, "Email the vendor 15m").unwrap();
+        assert!(plan_add(&c, Some("nope".into()), day, "x").is_err());
+        assert!(plan_add(&c, None, Some("25/09"), "x").is_err());
+        assert_eq!(
+            plan_show(&c, day, false).unwrap(),
+            "Plan Fri 25 Sep · 1/3 done · 30m left\n\
+             - [x] T-1 · A (10m)\n\
+             - [ ] T-1 · B (20m)\n\
+             - [ ] Email the vendor (15m)"
+        );
+        let json: serde_json::Value =
+            serde_json::from_str(&plan_show(&c, day, true).unwrap()).unwrap();
+        assert_eq!(json[1]["spent_min"], 5);
+        assert_eq!(json[0]["done"], true);
+        assert_eq!(json[2]["task"], serde_json::Value::Null);
     }
 
     #[test]
