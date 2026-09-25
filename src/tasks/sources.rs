@@ -19,6 +19,46 @@ pub struct Ticket {
     /// Longer description.
     #[serde(default, alias = "body")]
     pub description: String,
+    /// Workflow status (`In Progress`, `Done`, …) — used by the audit.
+    #[serde(default, alias = "state", deserialize_with = "text")]
+    pub status: String,
+    /// Finished, when the script knows better than the status name.
+    #[serde(default)]
+    pub done: Option<bool>,
+    /// When the ticket was created (any common date format).
+    #[serde(default, deserialize_with = "opt_text")]
+    pub created: Option<String>,
+    /// When work on it started.
+    #[serde(default, deserialize_with = "opt_text")]
+    pub started: Option<String>,
+    /// When it was resolved.
+    #[serde(
+        default,
+        alias = "resolved",
+        alias = "resolutiondate",
+        deserialize_with = "opt_text"
+    )]
+    pub finished: Option<String>,
+}
+
+/// A string, or a number / bool written as text (`null` → empty).
+fn text<'de, D: serde::Deserializer<'de>>(d: D) -> Result<String, D::Error> {
+    Ok(opt_text(d)?.unwrap_or_default())
+}
+
+/// Like [`text`], `None` for `null` and empty strings.
+fn opt_text<'de, D: serde::Deserializer<'de>>(d: D) -> Result<Option<String>, D::Error> {
+    let v = serde_json::Value::deserialize(d)?;
+    Ok(match v {
+        serde_json::Value::Null => None,
+        serde_json::Value::String(s) => Some(s).filter(|s| !s.trim().is_empty()),
+        other => Some(other.to_string()),
+    })
+}
+
+/// A number given as a number or as text.
+fn opt_number<'de, D: serde::Deserializer<'de>>(d: D) -> Result<Option<u64>, D::Error> {
+    Ok(opt_text(d)?.and_then(|s| s.trim().parse().ok()))
 }
 
 impl Ticket {
@@ -73,6 +113,7 @@ pub fn parse_tickets(output: &str) -> Result<Vec<Ticket>, String> {
                 title: cols.next().unwrap_or_default().to_owned(),
                 url: cols.next().unwrap_or_default().to_owned(),
                 description: cols.next().unwrap_or_default().replace("\\n", "\n"),
+                ..Ticket::default()
             }
         })
         .collect();
@@ -93,7 +134,7 @@ pub struct GerritStatus {
     #[serde(alias = "id")]
     pub change_id: String,
     /// Change number.
-    #[serde(default)]
+    #[serde(default, alias = "_number", deserialize_with = "opt_number")]
     pub number: Option<u64>,
     /// `NEW`, `MERGED`, `ABANDONED`, …
     #[serde(default)]
@@ -107,6 +148,24 @@ pub struct GerritStatus {
     /// Subject (replaces the commit subject when given).
     #[serde(default)]
     pub subject: Option<String>,
+    /// Gerrit project (for "my changes" in the audit).
+    #[serde(default, deserialize_with = "opt_text")]
+    pub project: Option<String>,
+    /// Target branch.
+    #[serde(default, deserialize_with = "opt_text")]
+    pub branch: Option<String>,
+    /// Topic (often the ticket id).
+    #[serde(default, deserialize_with = "opt_text")]
+    pub topic: Option<String>,
+    /// When the change was uploaded.
+    #[serde(default, alias = "createdOn", deserialize_with = "opt_text")]
+    pub created: Option<String>,
+    /// Last update.
+    #[serde(default, alias = "lastUpdated", deserialize_with = "opt_text")]
+    pub updated: Option<String>,
+    /// When it was merged.
+    #[serde(default, alias = "submitted", deserialize_with = "opt_text")]
+    pub merged: Option<String>,
 }
 
 impl GerritStatus {
@@ -152,10 +211,20 @@ pub fn parse_gerrit_status(output: &str) -> Result<Vec<GerritStatus>, String> {
 
 /// Run a task source command through `sh -c` and parse its output.
 pub fn fetch(command: &str, task_dir: Option<&std::path::Path>) -> Result<Vec<Ticket>, String> {
+    let env: Vec<(String, String)> = task_dir
+        .map(|d| ("PAHIRI_TASKS_DIR".to_owned(), d.display().to_string()))
+        .into_iter()
+        .collect();
+    run_script(command, &env).and_then(|out| parse_tickets(&out))
+}
+
+/// Run a command through `sh -c` with `env`; stdout, or the exit status and
+/// the tail of stderr.
+pub fn run_script(command: &str, env: &[(String, String)]) -> Result<String, String> {
     let mut cmd = Command::new("sh");
     cmd.arg("-c").arg(command);
-    if let Some(dir) = task_dir {
-        cmd.env("PAHIRI_TASKS_DIR", dir);
+    for (k, v) in env {
+        cmd.env(k, v);
     }
     let output = cmd
         .output()
@@ -178,12 +247,36 @@ pub fn fetch(command: &str, task_dir: Option<&std::path::Path>) -> Result<Vec<Ti
                 .join("\n")
         ));
     }
-    parse_tickets(&stdout)
+    Ok(stdout.into_owned())
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn parses_my_changes_for_the_audit() {
+        let out = r#"{"change_id":"I0123456789012345678901234567890123456789","number":12345,"status":"MERGED","url":"https://r/c/12345","subject":"Fix it","project":"fw","branch":"main","topic":"PROJ-1","created":1751446800,"updated":1752076800,"merged":1752076800,"labels":"CR+2"}"#;
+        let c = &parse_gerrit_status(out).unwrap()[0];
+        assert_eq!(c.number, Some(12345));
+        assert_eq!(c.project.as_deref(), Some("fw"));
+        assert_eq!(c.topic.as_deref(), Some("PROJ-1"));
+        assert_eq!(c.created.as_deref(), Some("1751446800"));
+        assert_eq!(
+            crate::time::normalize(c.merged.as_deref().unwrap()).unwrap(),
+            "2025-07-09T16:00:00Z"
+        );
+        assert_eq!(c.summary(), "MERGED #12345 CR+2");
+        // REST style: _number as text, submitted, no project.
+        let rest = r#"{"change_id":"I1","_number":"7","status":"NEW","submitted":null,"created":"2026-01-02 03:04:05.000000000"}"#;
+        let c = &parse_gerrit_status(rest).unwrap()[0];
+        assert_eq!((c.number, c.merged.as_ref()), (Some(7), None));
+        // Tickets with audit fields, dates as numbers.
+        let t = &parse_tickets(r#"{"id":"P-1","status":"Done","created":1790000000,"resolutiondate":"2026-09-22","done":false}"#).unwrap()[0];
+        assert_eq!(t.created.as_deref(), Some("1790000000"));
+        assert_eq!(t.finished.as_deref(), Some("2026-09-22"));
+        assert_eq!(t.done, Some(false));
+    }
 
     #[test]
     fn parses_json_array_with_aliases() {

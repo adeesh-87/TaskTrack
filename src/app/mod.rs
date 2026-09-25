@@ -14,6 +14,7 @@ pub mod timer;
 pub mod ui_state;
 
 mod agent;
+mod audit;
 mod clipboard;
 mod gerrit;
 mod help;
@@ -47,6 +48,7 @@ use crate::tasks::record::TaskRecord;
 use crate::tasks::{sources, TaskStore, Ticket};
 use crate::terminal::{keys, PtyEvent, ShellId};
 
+pub use self::audit::{change_line, AuditView};
 pub use self::config_form::ConfigForm;
 pub use self::context::{Focus, Shell, TaskContext};
 pub use self::event::{AppEvent, EventSender, JobEvent};
@@ -71,6 +73,8 @@ pub enum Mode {
     Home,
     /// Plan view: choosing today's work.
     Plan(PlanView),
+    /// Audit view: reviewing what the audit proposes.
+    Audit(Box<AuditView>),
     /// Task view: working inside one task.
     Task,
 }
@@ -152,6 +156,12 @@ pub struct App {
     config_mtime: Option<SystemTime>,
     /// `--tasks-dir` given on the command line (survives config reloads).
     tasks_dir_override: Option<PathBuf>,
+    /// When the `periodic` hook last ran (or pahiri started).
+    periodic_at: Instant,
+    /// The `periodic` hook is still running.
+    periodic_busy: bool,
+    /// The audit while the agent thinks about it.
+    audit_pending: Option<AuditView>,
     /// When the app started (for blinking).
     started: Instant,
     /// Last key press, paste or mouse event (idle check).
@@ -234,6 +244,9 @@ impl App {
             today_selected: 0,
             config_mtime: None,
             tasks_dir_override: None,
+            periodic_at: Instant::now(),
+            periodic_busy: false,
+            audit_pending: None,
             started: Instant::now(),
             last_input: Instant::now(),
             hooks_running: 0,
@@ -550,6 +563,7 @@ impl App {
         match self.mode {
             Mode::Settings(_) => self.handle_config_key(key),
             Mode::Plan(_) => self.handle_plan_key(key),
+            Mode::Audit(_) => self.handle_audit_key(key),
             Mode::Home => self.handle_list_key(key),
             Mode::Task => self.handle_task_key(key),
         }
@@ -605,7 +619,13 @@ impl App {
             | K::CodingArgs
             | K::CodingPrompt
             | K::CodingStartInCode => HelpTopic::Agents,
-            K::Hooks | K::HookTimeout => HelpTopic::Hooks,
+            K::AuditPrompt
+            | K::AuditGerrit
+            | K::AuditSince
+            | K::AuditAgent
+            | K::AuditDone
+            | K::AuditProgress => HelpTopic::Audit,
+            K::Hooks | K::HookTimeout | K::PeriodicMinutes => HelpTopic::Hooks,
             K::GerritUrl | K::GerritStatus => HelpTopic::Gerrit,
             K::Keys | K::LeaderKey | K::CopyCommand | K::PasteCommand => HelpTopic::Keys,
             K::FocusMinutes
@@ -1374,6 +1394,7 @@ impl App {
             Action::CloseEditor => self.close_editor(),
             Action::Help => self.open_help(HelpTopic::Keys),
             Action::RunHook => self.open_run_hook_menu(),
+            Action::Audit => self.start_audit(),
             Action::DeleteTask => self.request_delete_task(),
             Action::Timer => self.open_timer_menu(),
             Action::StopTimer => self.stop_timer(),
@@ -1698,6 +1719,19 @@ impl App {
                 found,
                 scanned,
             } => self.handle_gerrit(&task_id, found, scanned),
+            JobEvent::AuditFetched {
+                since,
+                tickets,
+                changes,
+                notes,
+            } => {
+                if matches!(self.popup, Some(Popup::Log { .. })) {
+                    self.audit_fetched(since, tickets, changes, notes);
+                } else {
+                    self.set_status("audit cancelled");
+                }
+            }
+            JobEvent::AuditAgent { result } => self.audit_agent_done(result),
             JobEvent::Agent {
                 task_id,
                 kind,
@@ -2932,7 +2966,7 @@ impl App {
             }
             Pending::EditPrompt(kind) => self.edit_prompt(kind),
             Pending::TimerStart(id) => self.start_timer(&id, None),
-            Pending::PlanDiscard => self.mode = Mode::Home,
+            Pending::PlanDiscard | Pending::AuditDiscard => self.mode = Mode::Home,
             Pending::PlanAdd(task) => {
                 if let Some(text) = input {
                     self.plan_add(task, &text);
@@ -2940,6 +2974,16 @@ impl App {
             }
             Pending::PlanStart(i) => self.start_plan_item(i),
             Pending::RunHook(name) => self.run_hook_now(&name),
+            Pending::AuditApply => self.apply_audit(),
+            p @ (Pending::AuditAttachAsk(_)
+            | Pending::AuditAttach(..)
+            | Pending::AuditNewAsk(_)
+            | Pending::AuditNew(_)
+            | Pending::AuditLeave(_)
+            | Pending::AuditTicketAsk(_)
+            | Pending::AuditTicketTo(..)
+            | Pending::AuditRenameAsk(_)
+            | Pending::AuditRename(_)) => self.audit_pending_action(p, input.as_deref()),
             Pending::StartFocusAsk(id) => {
                 self.popup = Some(Popup::input(
                     "Focus block",

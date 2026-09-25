@@ -917,8 +917,29 @@ impl App {
             self.reload_config_if_changed();
             if self.store.is_some() {
                 self.check_day();
+                self.run_periodic_hook(now);
             }
         }
+    }
+
+    /// The `periodic` hook, every `periodic_minutes` (not while the last run
+    /// is still going).
+    fn run_periodic_hook(&mut self, now: Instant) {
+        let every = self.config.periodic_minutes;
+        if every == 0 || now.duration_since(self.periodic_at) < Duration::from_secs(every * 60) {
+            return;
+        }
+        self.periodic_at = now;
+        let configured = self
+            .config
+            .hooks
+            .get(HookEvent::Periodic.name())
+            .is_some_and(|c| !c.trim().is_empty());
+        if !configured || self.periodic_busy {
+            return;
+        }
+        self.periodic_busy = true;
+        self.fire_hook(HookEvent::Periodic, None, Vec::new(), AfterHook::Nothing);
     }
 
     /// Time is up: flash, bell, a blinking chip and the hook. No popup — the

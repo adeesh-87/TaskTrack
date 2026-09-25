@@ -84,6 +84,28 @@ pub enum Pending {
     PlanStart(usize),
     /// Run the hook configured for this event now.
     RunHook(String),
+    /// Apply the ticked audit proposals.
+    AuditApply,
+    /// Leave the Audit view without applying.
+    AuditDiscard,
+    /// Audit: pick a task for this unmatched change.
+    AuditAttachAsk(String),
+    /// Audit: this change belongs to this task.
+    AuditAttach(String, String),
+    /// Audit: ask the id of a new task for this change.
+    AuditNewAsk(String),
+    /// Audit: a new task (entered id) for this change.
+    AuditNew(String),
+    /// Audit: leave this change alone.
+    AuditLeave(String),
+    /// Audit: pick a task for this ticket.
+    AuditTicketAsk(String),
+    /// Audit: record this ticket on this task.
+    AuditTicketTo(String, String),
+    /// Audit: ask the new id for this proposed task.
+    AuditRenameAsk(String),
+    /// Audit: rename this proposed task to the entered id.
+    AuditRename(String),
     /// Add the entered text to the plan (for this task, or a free item).
     PlanAdd(Option<String>),
     /// Nothing (used by cancel options).

@@ -165,6 +165,8 @@ pub struct AgentConfig {
     pub context_prompt: PathBuf,
     /// Checkpoint prompt template (empty: `<config dir>/prompts/checkpoints.md`).
     pub checkpoint_prompt: PathBuf,
+    /// Audit prompt template (empty: `<config dir>/prompts/audit.md`).
+    pub audit_prompt: PathBuf,
     /// Give up after this many seconds.
     pub timeout_secs: u64,
     /// Word limit for generated context (at most 1000).
@@ -178,6 +180,7 @@ impl Default for AgentConfig {
             args: vec!["-p".into()],
             context_prompt: PathBuf::new(),
             checkpoint_prompt: PathBuf::new(),
+            audit_prompt: PathBuf::new(),
             timeout_secs: 600,
             context_max_words: 600,
         }
@@ -230,6 +233,34 @@ impl Default for TimerConfig {
             flash: true,
             bell: true,
             idle_minutes: 15,
+        }
+    }
+}
+
+/// The audit: your tickets and changes, matched to tasks (Esc U).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(default)]
+pub struct AuditConfig {
+    /// Command that prints your Gerrit changes as JSON lines (help page, Audit tab).
+    pub gerrit_command: String,
+    /// How far back to look, in days (scripts get `$PAHIRI_AUDIT_SINCE`).
+    pub since_days: u64,
+    /// Let the agent decide what the rules could not match.
+    pub use_agent: bool,
+    /// Ticket statuses that also mean "done" (besides Done, Closed, Resolved, …).
+    pub done_statuses: Vec<String>,
+    /// Ticket statuses that also mean "in progress" (besides In Progress, In Review, …).
+    pub progress_statuses: Vec<String>,
+}
+
+impl Default for AuditConfig {
+    fn default() -> Self {
+        Self {
+            gerrit_command: String::new(),
+            since_days: 90,
+            use_agent: true,
+            done_statuses: Vec::new(),
+            progress_statuses: Vec::new(),
         }
     }
 }
@@ -305,6 +336,9 @@ pub struct Config {
     pub hooks: BTreeMap<String, String>,
     /// Give up on a hook after this many seconds.
     pub hook_timeout_secs: u64,
+    /// Run the `periodic` hook every this many minutes (0: never). For scripts
+    /// that keep things in sync, e.g. workspaces from what is on disk.
+    pub periodic_minutes: u64,
     /// Hide tasks finished more than this many days ago (0: never).
     pub archive_after_days: u64,
     /// Soft-wrap long lines of Markdown and plain text in the editor.
@@ -327,6 +361,8 @@ pub struct Config {
     pub timer: TimerConfig,
     /// Day planner.
     pub planner: PlannerConfig,
+    /// The audit.
+    pub audit: AuditConfig,
 }
 
 impl Default for Config {
@@ -354,6 +390,7 @@ impl Default for Config {
             gerrit_status_command: String::new(),
             hooks: BTreeMap::new(),
             hook_timeout_secs: 15,
+            periodic_minutes: 0,
             archive_after_days: 14,
             soft_wrap: true,
             copy_command: String::new(),
@@ -364,6 +401,7 @@ impl Default for Config {
             coding_agent: CodingAgentConfig::default(),
             timer: TimerConfig::default(),
             planner: PlannerConfig::default(),
+            audit: AuditConfig::default(),
         }
     }
 }
@@ -540,6 +578,7 @@ impl Config {
             PromptKind::Context => &self.agent.context_prompt,
             PromptKind::Checkpoints => &self.agent.checkpoint_prompt,
             PromptKind::Coding => &self.coding_agent.startup_prompt,
+            PromptKind::Audit => &self.agent.audit_prompt,
         };
         if configured.as_os_str().is_empty() {
             config_path

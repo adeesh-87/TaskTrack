@@ -21,11 +21,13 @@ pub enum PromptKind {
     Checkpoints,
     /// Startup prompt of the interactive coding agent.
     Coding,
+    /// Map tickets and changes the audit could not match (one-shot).
+    Audit,
 }
 
 impl PromptKind {
     /// All kinds, in menu order.
-    pub const ALL: [PromptKind; 3] = [Self::Context, Self::Checkpoints, Self::Coding];
+    pub const ALL: [PromptKind; 4] = [Self::Context, Self::Checkpoints, Self::Coding, Self::Audit];
 
     /// Default file name inside the prompts folder.
     pub fn file_name(self) -> &'static str {
@@ -33,6 +35,7 @@ impl PromptKind {
             Self::Context => "context.md",
             Self::Checkpoints => "checkpoints.md",
             Self::Coding => "coding-agent.md",
+            Self::Audit => "audit.md",
         }
     }
 
@@ -42,6 +45,7 @@ impl PromptKind {
             Self::Context => "context prompt (generate CONTEXT.md summary)",
             Self::Checkpoints => "checkpoint prompt (break task into checkpoints)",
             Self::Coding => "coding agent startup prompt",
+            Self::Audit => "audit prompt (map tickets and changes to tasks)",
         }
     }
 
@@ -51,6 +55,7 @@ impl PromptKind {
             Self::Context => DEFAULT_CONTEXT,
             Self::Checkpoints => DEFAULT_CHECKPOINTS,
             Self::Coding => DEFAULT_CODING,
+            Self::Audit => DEFAULT_AUDIT,
         }
     }
 
@@ -60,9 +65,41 @@ impl PromptKind {
             Self::Context => Some(CONTEXT_FORMAT.replace("{{max_words}}", &max_words.to_string())),
             Self::Checkpoints => Some(CHECKPOINT_FORMAT.to_owned()),
             Self::Coding => None,
+            Self::Audit => Some(AUDIT_FORMAT.to_owned()),
         }
     }
 }
+
+const DEFAULT_AUDIT: &str = "\
+You are reconciling a developer's task list with their tickets and code
+reviews, so that every piece of work they did is recorded against a task
+(for their annual review). pahiri already matched what it could by ids,
+links, topics and ticket keys; below is what is left.
+
+- Map an unmatched change to an existing task when its subject, project or
+  topic clearly belongs to that task's work.
+- Group unmatched changes that belong together into one new task, with a
+  short id (letters, digits, -) and a title.
+- Map a ticket to an existing task only when they are clearly the same work
+  (a task made by hand before the ticket existed).
+- Skip a change only when it is noise (a merge, a version bump) that fits
+  nowhere.
+- When unsure, leave it out: the owner decides in the review screen.
+
+Changes and tickets since {{since}}:
+
+{{items}}
+";
+
+/// Fixed output format for the audit (see `tasks::audit::parse_ai_answer`).
+pub const AUDIT_FORMAT: &str = "\
+OUTPUT FORMAT (fixed — pahiri parses it; anything else is ignored)
+One decision per line, nothing else:
+MAP C:<change> -> <existing task id> | <short reason>
+MAP T:<ticket> -> <existing task id> | <short reason>
+NEW C:<change> [C:<change> ...] -> <new-task-id> | <title>
+SKIP C:<change> | <short reason>
+Use only the keys and task ids listed above. Leave out what you are unsure about.";
 
 const DEFAULT_CONTEXT: &str = "\
 You are preparing the working context for task {{task}} so that its owner

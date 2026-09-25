@@ -287,6 +287,9 @@ impl App {
         waited: bool,
     ) {
         self.hooks_running = self.hooks_running.saturating_sub(1);
+        if event == HookEvent::Periodic {
+            self.periodic_busy = false;
+        }
         let ok = result.is_ok();
         let output = match &result {
             Ok(o) | Err(o) => o.trim_end().to_owned(),

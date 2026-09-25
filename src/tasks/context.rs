@@ -490,6 +490,7 @@ mod tests {
             title: "Fix it".into(),
             url: "https://j/PROJ-1".into(),
             description: "Steps\n1. a".into(),
+            ..Ticket::default()
         };
         let md = render_new("PROJ-1", Some("jira"), Some(&t), "2026-01-01T00:00:00Z");
         assert!(md.starts_with("# PROJ-1: Fix it\n\nSource: jira\nLink: https://j/PROJ-1\n\n## Description\n\nSteps\n1. a\n"));

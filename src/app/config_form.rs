@@ -61,6 +61,18 @@ pub enum FieldKey {
     ContextPrompt,
     /// Checkpoint prompt template path.
     CheckpointPrompt,
+    /// Audit prompt path.
+    AuditPrompt,
+    /// Command listing my Gerrit changes.
+    AuditGerrit,
+    /// Days the audit looks back.
+    AuditSince,
+    /// Let the agent match what the rules could not.
+    AuditAgent,
+    /// Extra "done" statuses.
+    AuditDone,
+    /// Extra "in progress" statuses.
+    AuditProgress,
     /// Coding agent program.
     CodingCommand,
     /// Coding agent arguments.
@@ -85,6 +97,8 @@ pub enum FieldKey {
     Hooks,
     /// Hook timeout.
     HookTimeout,
+    /// Minutes between `periodic` hook runs.
+    PeriodicMinutes,
     /// Gerrit status command.
     GerritStatus,
     /// Archive finished tasks after N days.
@@ -302,6 +316,12 @@ impl ConfigForm {
                 Value::Number(cfg.hook_timeout_secs.to_string()),
             ),
             field(
+                FieldKey::PeriodicMinutes,
+                "Periodic hook (min)",
+                "Run the `periodic` hook every this many minutes (0: never) — for scripts that keep things in sync, like examples/hooks/discover-workspaces.sh.",
+                Value::Number(cfg.periodic_minutes.to_string()),
+            ),
+            field(
                 FieldKey::GerritUrl,
                 "Gerrit URL",
                 "Web URL of your Gerrit, e.g. https://review.example.com. Empty: derived from each workspace's origin remote. Used by Esc g.",
@@ -348,6 +368,42 @@ impl ConfigForm {
                 "Checkpoint prompt file",
                 "Template for Esc b. Empty: prompts/checkpoints.md next to the config file.",
                 Value::Text(cfg.agent.checkpoint_prompt.display().to_string()),
+            ),
+            field(
+                FieldKey::AuditPrompt,
+                "Audit prompt file",
+                "Template for the audit's agent step (Esc U). Empty: prompts/audit.md next to the config file.",
+                Value::Text(cfg.agent.audit_prompt.display().to_string()),
+            ),
+            field(
+                FieldKey::AuditGerrit,
+                "Audit: Gerrit command",
+                "Prints your Gerrit changes since $PAHIRI_AUDIT_SINCE as JSON lines (? shows the format; examples/gerrit-mine.sh).",
+                Value::Text(cfg.audit.gerrit_command.clone()),
+            ),
+            field(
+                FieldKey::AuditSince,
+                "Audit: days back",
+                "How far back the audit looks (scripts get PAHIRI_AUDIT_SINCE).",
+                Value::Number(cfg.audit.since_days.to_string()),
+            ),
+            field(
+                FieldKey::AuditAgent,
+                "Audit: use the agent",
+                "Let the agent match the changes and tickets the rules could not (you still review everything).",
+                Value::Toggle(cfg.audit.use_agent),
+            ),
+            field(
+                FieldKey::AuditDone,
+                "Audit: done statuses",
+                "Ticket statuses that mean finished, besides Done, Closed, Resolved, Fixed, Complete(d), Verified, Released.",
+                Value::List(cfg.audit.done_statuses.clone()),
+            ),
+            field(
+                FieldKey::AuditProgress,
+                "Audit: in-progress statuses",
+                "Ticket statuses that mean being worked on, besides In Progress, In Review, Review, Code Review, Testing, …",
+                Value::List(cfg.audit.progress_statuses.clone()),
             ),
             field(
                 FieldKey::CodingCommand,
@@ -940,6 +996,33 @@ impl ConfigForm {
                 (FieldKey::CheckpointPrompt, Value::Text(v)) => {
                     cfg.agent.checkpoint_prompt = path_or_empty(v);
                 }
+                (FieldKey::AuditPrompt, Value::Text(v)) => {
+                    cfg.agent.audit_prompt = path_or_empty(v);
+                }
+                (FieldKey::AuditGerrit, Value::Text(v)) => {
+                    v.trim().clone_into(&mut cfg.audit.gerrit_command);
+                }
+                (FieldKey::AuditSince, Value::Number(v)) => match v.trim().parse() {
+                    Ok(n) if n > 0 => cfg.audit.since_days = n,
+                    _ => errors.push(format!(
+                        "audit days back must be a number above 0, got {v:?}"
+                    )),
+                },
+                (FieldKey::AuditAgent, Value::Toggle(b)) => cfg.audit.use_agent = *b,
+                (FieldKey::AuditDone, Value::List(items)) => {
+                    cfg.audit.done_statuses = items
+                        .iter()
+                        .map(|s| s.trim().to_owned())
+                        .filter(|s| !s.is_empty())
+                        .collect();
+                }
+                (FieldKey::AuditProgress, Value::List(items)) => {
+                    cfg.audit.progress_statuses = items
+                        .iter()
+                        .map(|s| s.trim().to_owned())
+                        .filter(|s| !s.is_empty())
+                        .collect();
+                }
                 (FieldKey::CodingCommand, Value::Text(v)) => {
                     v.trim().clone_into(&mut cfg.coding_agent.command);
                 }
@@ -991,6 +1074,12 @@ impl ConfigForm {
                         }
                     }
                 }
+                (FieldKey::PeriodicMinutes, Value::Number(v)) => match v.trim().parse() {
+                    Ok(n) => cfg.periodic_minutes = n,
+                    Err(_) => {
+                        errors.push(format!("periodic hook minutes must be a number, got {v:?}"));
+                    }
+                },
                 (FieldKey::HookTimeout, Value::Number(v)) => match v.trim().parse() {
                     Ok(n) => cfg.hook_timeout_secs = n,
                     Err(_) => errors.push(format!("hook timeout must be a number, got {v:?}")),

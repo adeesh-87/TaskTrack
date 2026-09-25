@@ -9,6 +9,8 @@ pub enum Action {
     PlanDay,
     /// Run a configured hook now.
     RunHook,
+    /// Audit tickets and changes against the tasks.
+    Audit,
     /// Open settings.
     Config,
     /// Quit pahiri.
@@ -83,10 +85,11 @@ pub enum Action {
 
 impl Action {
     /// Every action (for key overrides and help).
-    pub const ALL: [Action; 38] = [
+    pub const ALL: [Action; 39] = [
         Self::TaskList,
         Self::PlanDay,
         Self::RunHook,
+        Self::Audit,
         Self::Config,
         Self::Quit,
         Self::NewTask,
@@ -130,6 +133,7 @@ impl Action {
             Self::TaskList => "task_list",
             Self::PlanDay => "plan_day",
             Self::RunHook => "run_hook",
+            Self::Audit => "audit",
             Self::Config => "config",
             Self::Quit => "quit",
             Self::NewTask => "new_task",
@@ -198,6 +202,11 @@ pub fn list_commands() -> Vec<Command> {
             Action::NewTask,
         ),
         cmd('y', "plan your day (p)", Action::PlanDay),
+        cmd(
+            'U',
+            "audit: match my tickets and changes to tasks",
+            Action::Audit,
+        ),
         cmd('!', "run a hook now (e.g. re-run startup)", Action::RunHook),
         cmd(
             'm',
@@ -223,6 +232,11 @@ pub fn task_commands() -> Vec<Command> {
     vec![
         cmd('T', "back to Home", Action::TaskList),
         cmd('y', "plan your day", Action::PlanDay),
+        cmd(
+            'U',
+            "audit: match my tickets and changes to tasks",
+            Action::Audit,
+        ),
         cmd('!', "run a hook now (e.g. re-run startup)", Action::RunHook),
         cmd(
             'p',

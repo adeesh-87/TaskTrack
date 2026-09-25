@@ -297,6 +297,12 @@ impl App {
         &self.plan_date
     }
 
+    /// The task Home is pointing at: the selected plan item's task when the
+    /// Today pane has the keys, else the selected board row.
+    pub fn home_task(&self) -> Option<String> {
+        self.current_task_id()
+    }
+
     /// Which pane of Home has the keys.
     pub fn home_focus(&self) -> HomeFocus {
         self.home_focus

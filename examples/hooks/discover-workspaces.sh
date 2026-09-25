@@ -1,9 +1,11 @@
 #!/bin/sh
-# startup hook: fill in code workspaces and vendor builds from what is on
-# disk. Re-run it any time with Esc ! → startup; pahiri reloads the config
-# when it changes (no restart).
+# startup / periodic hook: fill in code workspaces and vendor builds from
+# what is on disk, and keep them in sync. pahiri reloads the config when it
+# changes (no restart); Esc ! → startup runs it now.
+#   periodic_minutes = 10
 #   [hooks]
-#   startup = "~/src/pahiri/examples/hooks/discover-workspaces.sh"
+#   startup  = "~/src/pahiri/examples/hooks/discover-workspaces.sh"
+#   periodic = "~/src/pahiri/examples/hooks/discover-workspaces.sh"
 #
 # What it finds (change the roots with environment variables, e.g. in the
 # hook command: startup = "CODE_ROOTS=~/src:~/work ~/…/discover-workspaces.sh"):
