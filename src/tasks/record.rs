@@ -37,12 +37,73 @@ pub struct TaskRecord {
     pub workspaces: Vec<String>,
     /// Gerrit changes as `workspace change-id url :: subject`.
     pub gerrit: Vec<String>,
+    /// The same changes, with their fields (for the Home view).
+    pub changes: Vec<ChangeRecord>,
+    /// One line about what the task is: the goal from `## Context`, else the
+    /// first line of `## Description`.
+    pub summary: String,
     /// Checkpoints.
     pub checkpoints: Vec<CheckpointRecord>,
     /// `## Outcome` lines.
     pub outcome: Vec<String>,
     /// `## Log` lines.
     pub log: Vec<String>,
+}
+
+/// A Gerrit change of a task.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub struct ChangeRecord {
+    /// Workspace (or project) name.
+    pub workspace: String,
+    /// `Change-Id`.
+    pub change_id: String,
+    /// Review link.
+    pub url: Option<String>,
+    /// Commit subject.
+    pub subject: String,
+    /// Status, e.g. `MERGED #1234 CR+2`.
+    pub status: Option<String>,
+}
+
+/// Longest summary kept.
+const SUMMARY_CHARS: usize = 200;
+
+/// The first line of prose in `text` (skipping headings, markers, empty and
+/// bullet-only lines), without list markers, cut to [`SUMMARY_CHARS`].
+fn first_prose(text: &str) -> Option<String> {
+    let line = text
+        .lines()
+        .map(str::trim)
+        .filter(|l| !l.is_empty() && !l.starts_with('#') && !l.starts_with("<!--"))
+        .map(|l| {
+            l.trim_start_matches(|c: char| matches!(c, '-' | '*' | '+' | '>') || c.is_whitespace())
+                .trim()
+        })
+        .find(|l| !l.is_empty())?;
+    let mut out: String = line.chars().take(SUMMARY_CHARS).collect();
+    if line.chars().count() > SUMMARY_CHARS {
+        out.push('…');
+    }
+    Some(out)
+}
+
+/// One line about the task: the `### Goal` of the AI context (else its first
+/// line), else the first line of `## Description`.
+pub fn summary_of(markdown: &str) -> String {
+    let context = super::sections::extract(
+        markdown,
+        super::context::CONTEXT_BEGIN,
+        super::context::CONTEXT_END,
+    );
+    let goal = context.and_then(|c| {
+        let after = c
+            .split("\n### ")
+            .find(|part| part.trim_start_matches("### ").starts_with("Goal"))?;
+        first_prose(after.split_once('\n').map_or("", |(_, rest)| rest))
+    });
+    goal.or_else(|| context.and_then(first_prose))
+        .or_else(|| first_prose(&section_lines(markdown, "## Description").join("\n")))
+        .unwrap_or_default()
 }
 
 /// Serializable checkpoint.
@@ -116,6 +177,18 @@ impl TaskRecord {
                     s
                 })
                 .collect(),
+            changes: meta
+                .gerrit
+                .iter()
+                .map(|g| ChangeRecord {
+                    workspace: g.workspace.clone(),
+                    change_id: g.change_id.clone(),
+                    url: g.url.clone(),
+                    subject: g.subject.clone(),
+                    status: g.status.clone(),
+                })
+                .collect(),
+            summary: summary_of(markdown),
             checkpoints: items.iter().map(CheckpointRecord::from).collect(),
             outcome: section_lines(markdown, OUTCOME_HEADING)
                 .into_iter()
@@ -235,6 +308,21 @@ mod tests {
         assert!(md.starts_with("## PROJ-1 — Fix login\n- Done · created 2026-03-01 · started 2026-03-02 · finished 2026-03-10 · time 1h35m\n"), "{md}");
         assert!(md.contains("- checkpoints: 1/2 · estimated 30m · spent 12m\n"));
         assert!(md.contains("- outcome: 2026-03-10 12:00 Shipped"));
+    }
+
+    #[test]
+    fn summary_prefers_the_goal_then_the_description() {
+        let with_goal = "# T\n\n## Description\n\nThe ticket text.\n\n## Context\n<!-- pahiri:context -->\n### Background\n- old stuff\n\n### Goal\n- Make login survive token expiry\n<!-- /pahiri:context -->\n";
+        assert_eq!(summary_of(with_goal), "Make login survive token expiry");
+        let no_goal = "# T\n\n## Context\n<!-- pahiri:context -->\nSome words first.\n<!-- /pahiri:context -->\n";
+        assert_eq!(summary_of(no_goal), "Some words first.");
+        let description = "# T\n\n## Description\n\n> quoted *intro* line\nmore\n\n## Notes\n";
+        assert_eq!(summary_of(description), "quoted *intro* line");
+        assert_eq!(summary_of("# T\n\n## Notes\n"), "");
+        let long = format!("# T\n\n## Description\n{}\n", "x".repeat(300));
+        assert_eq!(summary_of(&long).chars().count(), SUMMARY_CHARS + 1);
+        let r = TaskRecord::from_markdown("PROJ-1", "Done", MD);
+        assert_eq!(r.changes[0].subject, "Fix token");
     }
 
     #[test]

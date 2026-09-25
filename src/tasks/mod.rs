@@ -19,6 +19,7 @@
 //! Keeping the board in Markdown means it stays human-editable, diffs well in
 //! git and matches the file the user already maintains by hand.
 
+pub mod audit;
 pub mod board;
 pub mod checkpoints;
 pub mod context;

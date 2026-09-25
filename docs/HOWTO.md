@@ -33,7 +33,8 @@ Prefer calling `self.run_action(Action::X)` so keys and palette stay in sync.
 2. `src/app/config_form.rs`: `FieldKey` variant; a `field(...)` entry in
    `ConfigForm::new` (label, help, `Value::Text|Number|Toggle|List`); a match arm in
    `to_config`. Map the key to a help tab in `App::config_help` (`src/app/mod.rs`).
-3. README settings table.
+3. README settings table. (`config.toml` is reloaded live when it changes on
+   disk; `validate()` errors keep the old settings, `warnings()` only report.)
 
 ## Add a popup
 

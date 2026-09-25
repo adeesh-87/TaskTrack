@@ -1847,3 +1847,384 @@ fn mouse_and_timer_menu_work_on_the_plan() {
     );
     h.app.shutdown();
 }
+
+/// Set `path`'s modification time `secs` seconds ahead so a change is seen
+/// even on coarse file-system clocks.
+fn bump_mtime(path: &Path, secs: u64) {
+    let f = fs::File::options().write(true).open(path).unwrap();
+    f.set_modified(std::time::SystemTime::now() + Duration::from_secs(secs))
+        .unwrap();
+}
+
+#[test]
+fn config_changes_on_disk_are_reloaded() {
+    let mut h = Harness::new(true);
+    let path = h.root.join("config.toml");
+    h.app.config().save(&path).unwrap();
+    bump_mtime(&path, 1);
+    h.watch();
+    assert!(h.app.status().is_none(), "same settings: nothing to say");
+
+    // A script adds a workspace and a build: pahiri picks them up.
+    let fw = h.root.join("fw");
+    let yocto = h.root.join("yocto");
+    fs::create_dir_all(&fw).unwrap();
+    fs::create_dir_all(&yocto).unwrap();
+    crate::cli::config_add_workspace(&path, "fw", &fw, Some("main".into())).unwrap();
+    crate::cli::config_add_build(&path, "yocto", &yocto).unwrap();
+    bump_mtime(&path, 2);
+    h.watch();
+    assert_eq!(h.app.config().workspaces.len(), 1);
+    assert_eq!(h.app.config().builds.len(), 1);
+    assert_eq!(
+        h.app.status(),
+        Some("config reloaded from disk · workspaces 1 (+1) · builds 1 (+1)")
+    );
+
+    // Broken or invalid files keep the previous settings.
+    let good = fs::read_to_string(&path).unwrap();
+    fs::write(&path, "garbage = [").unwrap();
+    bump_mtime(&path, 3);
+    h.watch();
+    assert!(h.app.status().unwrap().contains("cannot be read"));
+    assert_eq!(h.app.config().workspaces.len(), 1);
+    fs::write(&path, good.replace("name = \"fw\"", "name = \"f w\"")).unwrap();
+    bump_mtime(&path, 4);
+    h.watch();
+    let status = h.app.status().unwrap().to_owned();
+    assert!(status.contains("keeping the previous settings"), "{status}");
+    assert_eq!(h.app.config().workspaces[0].name, "fw");
+    // A missing folder is loaded, with a warning.
+    let missing = good.replace(&fw.display().to_string(), "/no/such/dir");
+    fs::write(&path, missing).unwrap();
+    bump_mtime(&path, 5);
+    h.press(key(KeyCode::Down));
+    h.watch();
+    let status = h.app.status().unwrap().to_owned();
+    assert!(
+        status.contains("folder is missing: /no/such/dir"),
+        "{status}"
+    );
+    assert_eq!(
+        h.app.config().workspaces[0].path,
+        std::path::PathBuf::from("/no/such/dir")
+    );
+
+    // Unsaved edits on the Settings view win until you leave it.
+    fs::write(&path, &good).unwrap();
+    bump_mtime(&path, 6);
+    h.watch();
+    h.press(key(KeyCode::Char(',')));
+    h.press(key(KeyCode::Enter));
+    h.type_str("x");
+    h.press(key(KeyCode::Enter));
+    assert!(matches!(h.app.mode(), Mode::Settings(f) if f.dirty()));
+    crate::cli::config_remove(&path, true, "yocto").unwrap();
+    bump_mtime(&path, 7);
+    h.watch();
+    assert!(h.app.status().unwrap().contains("changed on disk"));
+    assert_eq!(h.app.config().builds.len(), 1);
+    h.press(key(KeyCode::Esc));
+    h.press(key(KeyCode::Char('y')));
+    assert!(matches!(h.app.mode(), Mode::Home));
+    h.watch();
+    assert!(
+        h.app.config().builds.is_empty(),
+        "reloaded after leaving Settings"
+    );
+}
+
+#[test]
+fn tasks_dir_override_survives_a_reload() {
+    let mut h = Harness::new(true);
+    let path = h.root.join("config.toml");
+    let mut on_disk = h.app.config().clone();
+    let elsewhere = h.root.join("elsewhere");
+    fs::create_dir_all(&elsewhere).unwrap();
+    on_disk.tasks_dir.clone_from(&elsewhere);
+    on_disk.default_main_branch = "develop".into();
+    on_disk.save(&path).unwrap();
+    let tasks = h.tasks.clone();
+    h.app.set_tasks_dir_override(tasks.clone());
+    bump_mtime(&path, 1);
+    h.watch();
+    assert_eq!(h.app.config().default_main_branch, "develop");
+    assert_eq!(h.app.config().tasks_dir, tasks);
+}
+
+#[test]
+fn run_a_hook_now_from_the_palette() {
+    let mut h = Harness::build(true, |cfg| {
+        cfg.hooks.insert(
+            "startup".into(),
+            "echo \"manual=$PAHIRI_MANUAL task=$PAHIRI_TASK\" > \"$PAHIRI_TASKS_DIR/ran.txt\""
+                .into(),
+        );
+    });
+    let ran = h.tasks.join("ran.txt");
+    assert!(h.pump_until(|_| fs::read_to_string(&ran).is_ok_and(|s| s.contains("manual= "))));
+    fs::remove_file(&ran).unwrap();
+    h.press(key(KeyCode::Esc));
+    h.press(key(KeyCode::Char('!')));
+    assert!(popup_title(&h.app).starts_with("Run a hook now"));
+    h.choose("startup");
+    assert!(h.pump_until(|_| {
+        fs::read_to_string(&ran).is_ok_and(|s| s.trim() == "manual=1 task=alpha")
+    }));
+    // With no hooks configured it says so instead of opening an empty menu.
+    let mut h = Harness::new(true);
+    h.press(key(KeyCode::Esc));
+    h.press(key(KeyCode::Char('!')));
+    assert!(h.app.popup().is_none());
+    assert!(h.app.status().unwrap().contains("no hooks configured"));
+}
+
+#[test]
+fn a_missing_workspace_folder_does_not_stop_pahiri() {
+    let h = Harness::build(true, |cfg| {
+        cfg.workspaces.push(crate::config::Workspace {
+            name: "gone".into(),
+            path: cfg.tasks_dir.join("no-such-checkout"),
+            main_branch: None,
+        });
+    });
+    assert!(
+        matches!(h.app.mode(), Mode::Home),
+        "starts on Home, not Settings"
+    );
+    let status = h.app.status().unwrap_or_default();
+    assert!(
+        status.contains("workspace gone folder is missing"),
+        "{status}"
+    );
+    assert!(status.contains("pahiri config prune"), "{status}");
+}
+
+#[test]
+fn periodic_hook_runs_every_n_minutes() {
+    let mut h = Harness::build(true, |cfg| {
+        cfg.periodic_minutes = 10;
+        cfg.hooks.insert(
+            "periodic".into(),
+            "echo run >> \"$PAHIRI_TASKS_DIR/periodic.txt\"".into(),
+        );
+    });
+    let file = h.tasks.join("periodic.txt");
+    h.watch();
+    assert!(!file.exists(), "not before the interval");
+    h.app.periodic_at = Instant::now()
+        .checked_sub(Duration::from_secs(601))
+        .unwrap();
+    h.watch();
+    assert!(h.pump_until(|app| !app.periodic_busy));
+    h.watch();
+    h.pump_until(|app| app.hooks_running() == 0);
+    assert_eq!(
+        fs::read_to_string(&file).unwrap(),
+        "run\n",
+        "once per interval"
+    );
+}
+
+/// Scripts for the audit: two tickets, four changes.
+fn audit_scripts(cfg: &mut Config) {
+    let tickets = r#"[
+      {"id":"PROJ-1","title":"Fix the parser","url":"https://jira/browse/PROJ-1","description":"Parser breaks on tabs.","status":"Done","created":"2026-07-01T09:00:00.000+0000","finished":"2026-08-02T17:00:00.000+0000"},
+      {"id":"beta","title":"Beta work","url":"https://jira/browse/beta","status":"Closed","finished":"2026-08-10"}
+    ]"#;
+    let changes = [
+        r#"{"change_id":"I1111111111111111111111111111111111111111","number":11,"status":"MERGED","project":"fw","subject":"PROJ-1: handle tabs","created":"2026-07-02 10:00:00","merged":"2026-07-09 16:00:00"}"#,
+        r#"{"change_id":"I1212121212121212121212121212121212121212","number":12,"status":"NEW","project":"fw","topic":"alpha","subject":"Alpha step one"}"#,
+        r#"{"change_id":"I1313131313131313131313131313131313131313","number":13,"status":"NEW","project":"fw","subject":"Refactor the dts"}"#,
+        r#"{"change_id":"I1414141414141414141414141414141414141414","number":14,"status":"MERGED","project":"fw","subject":"Bump version","updated":"2026-07-20 08:00:00"}"#,
+    ]
+    .join("\n");
+    cfg.task_sources = vec![TaskSource {
+        name: "jira".into(),
+        command: format!(
+            "[ \"$PAHIRI_AUDIT\" = 1 ] && [ -n \"$PAHIRI_AUDIT_SINCE\" ] && printf '%s' '{tickets}'"
+        ),
+    }];
+    cfg.audit.gerrit_command = format!("printf '%s\\n' '{}'", changes.replace('\n', "' '"));
+}
+
+fn audit_view(app: &App) -> &AuditView {
+    match app.mode() {
+        Mode::Audit(v) => v,
+        _ => panic!("not in the Audit view: {:?}", app.popup()),
+    }
+}
+
+#[test]
+fn audit_matches_asks_the_agent_and_applies() {
+    let mut h = Harness::build(true, |cfg| {
+        audit_scripts(cfg);
+        cfg.agent.command = "sh".into();
+        cfg.agent.args = vec![
+            "-c".into(),
+            "cat > /dev/null; printf 'MAP C:13 -> alpha | dts work\\nNEW C:14 -> release-bump | Version bumps\\n'"
+                .into(),
+        ];
+    });
+    h.press(key(KeyCode::Esc));
+    h.press(key(KeyCode::Char('U')));
+    assert!(h.pump_until(|app| matches!(app.mode(), Mode::Audit(_))));
+    let v = audit_view(&h.app);
+    let keys: Vec<String> = v.items.iter().map(|i| i.proposal.key()).collect();
+    assert_eq!(
+        keys,
+        [
+            "new:PROJ-1",
+            "new:release-bump",
+            "update:alpha",
+            "update:beta"
+        ],
+        "{:#?}",
+        v.items
+    );
+    assert!(v.items[1].by_ai && v.items[2].by_ai && !v.items[0].by_ai);
+    assert_eq!(v.counts(), (2, 2, 0, 4));
+
+    h.press(key(KeyCode::Char('a')));
+    assert!(popup_title(&h.app).contains("Apply"));
+    h.press(key(KeyCode::Char('y')));
+    assert!(matches!(h.app.mode(), Mode::Home));
+    let status = h.app.status().unwrap_or_default().to_owned();
+    assert!(
+        status.contains("audit applied: 2 created, 2 updated"),
+        "{status}"
+    );
+
+    // New task from the ticket: done, dates from the ticket and its change.
+    let p1 = h.context_md("PROJ-1");
+    assert!(p1.starts_with("# PROJ-1: Fix the parser\n"), "{p1}");
+    assert!(
+        p1.contains("## Description\n\nParser breaks on tabs."),
+        "{p1}"
+    );
+    for line in [
+        "- source: jira",
+        "- link: https://jira/browse/PROJ-1",
+        "- gerrit: fw I1111111111111111111111111111111111111111 [MERGED #11] :: PROJ-1: handle tabs",
+        "- created: 2026-07-01T09:00:00Z",
+        "- started: 2026-07-02T10:00:00Z",
+        "- finished: 2026-08-02T17:00:00Z",
+    ] {
+        assert!(p1.contains(line), "{line} missing in\n{p1}");
+    }
+    let board = fs::read_to_string(h.tasks.join("status.md")).unwrap();
+    let done = board.split("## Done").nth(1).unwrap_or_default().to_owned();
+    assert!(
+        done.contains("- PROJ-1") && done.contains("- release-bump") && done.contains("- beta"),
+        "{board}"
+    );
+    // The agent's new task, made from its change.
+    let rb = h.context_md("release-bump");
+    assert!(rb.starts_with("# release-bump: Version bumps\n"), "{rb}");
+    assert!(rb.contains("- finished: 2026-07-20T08:00:00Z"), "{rb}");
+    // alpha gets both changes (topic + the agent's MAP) and moves to Doing.
+    let alpha = h.context_md("alpha");
+    assert_eq!(alpha.matches("- gerrit: fw ").count(), 2, "{alpha}");
+    assert!(alpha.contains("audit: + CR NEW #12"), "{alpha}");
+    let doing = board
+        .split("## Doing")
+        .nth(1)
+        .unwrap()
+        .split("## Done")
+        .next()
+        .unwrap();
+    assert!(doing.contains("- alpha"), "{board}");
+    // beta: done with the ticket's date.
+    assert!(h
+        .context_md("beta")
+        .contains("- finished: 2026-08-10T00:00:00Z"));
+    // A report.
+    let reports: Vec<_> = fs::read_dir(h.tasks.join(".pahiri/audit"))
+        .unwrap()
+        .collect();
+    assert_eq!(reports.len(), 1);
+    let report = fs::read_to_string(reports[0].as_ref().unwrap().path()).unwrap();
+    assert!(
+        report.contains("## Created\n\n- PROJ-1 — Fix the parser → Done"),
+        "{report}"
+    );
+    // Running it again finds nothing new.
+    h.press(key(KeyCode::Esc));
+    h.press(key(KeyCode::Char('U')));
+    assert!(h.pump_until(|app| matches!(app.popup(), Some(Popup::Log { done: true, .. }))));
+    assert!(matches!(h.app.mode(), Mode::Home));
+}
+
+#[test]
+fn audit_leaves_unmatched_changes_to_you() {
+    let mut h = Harness::build(true, |cfg| {
+        audit_scripts(cfg);
+        cfg.audit.use_agent = false;
+    });
+    h.press(key(KeyCode::Esc));
+    h.press(key(KeyCode::Char('U')));
+    assert!(h.pump_until(|app| matches!(app.mode(), Mode::Audit(_))));
+    assert_eq!(audit_view(&h.app).counts(), (1, 2, 2, 3));
+    // Untick the beta update; attach #13 to alpha; make #14 a new task.
+    let pos = |h: &Harness, key: &str| {
+        audit_view(&h.app)
+            .items
+            .iter()
+            .position(|i| i.proposal.key() == key)
+            .unwrap()
+    };
+    let select = |h: &mut Harness, i: usize| {
+        if let Mode::Audit(v) = &mut h.app.mode {
+            v.selected = i;
+        }
+    };
+    let i = pos(&h, "update:beta");
+    select(&mut h, i);
+    h.press(key(KeyCode::Char(' ')));
+    let i = pos(&h, "orphan:13");
+    select(&mut h, i);
+    h.press(key(KeyCode::Enter));
+    h.choose("attach it");
+    h.choose("alpha");
+    let i = pos(&h, "orphan:14");
+    select(&mut h, i);
+    h.press(key(KeyCode::Enter));
+    h.choose("make a new task");
+    if let Some(Popup::Input { value, .. }) = &mut h.app.popup {
+        value.clear();
+    }
+    h.type_str("bumps");
+    h.press(key(KeyCode::Enter));
+    let v = audit_view(&h.app);
+    assert_eq!(v.counts(), (2, 2, 0, 3), "{:#?}", v.items);
+    let crate::tasks::audit::Proposal::Update(u) = &v.items[pos(&h, "update:alpha")].proposal
+    else {
+        panic!()
+    };
+    assert_eq!(u.changes.len(), 2);
+    // Rename the new task from the ticket.
+    let i = pos(&h, "new:PROJ-1");
+    select(&mut h, i);
+    h.press(key(KeyCode::Enter));
+    h.choose("rename");
+    if let Some(Popup::Input { value, .. }) = &mut h.app.popup {
+        value.clear();
+    }
+    h.type_str("parser-fix");
+    h.press(key(KeyCode::Enter));
+    // Esc asks before throwing the decisions away.
+    h.press(key(KeyCode::Esc));
+    assert!(popup_title(&h.app).contains("Leave the audit"));
+    h.press(key(KeyCode::Char('n')));
+    h.press(key(KeyCode::Char('a')));
+    h.press(key(KeyCode::Char('y')));
+    assert!(h.tasks.join("parser-fix/CONTEXT.md").is_file());
+    assert!(!h.tasks.join("PROJ-1").exists());
+    let status = h.app.status().unwrap_or_default().to_owned();
+    assert!(h.tasks.join("bumps").is_dir(), "{status}");
+    assert!(h
+        .context_md("bumps")
+        .contains("#14 MERGED fw · Bump version"));
+    let beta = fs::read_to_string(h.tasks.join("beta/CONTEXT.md")).unwrap_or_default();
+    assert!(!beta.contains("- finished:"), "unticked");
+}

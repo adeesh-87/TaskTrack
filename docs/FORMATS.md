@@ -92,6 +92,23 @@ Run through `sh -c`; print one of: JSON array, JSON lines, or TSV
 Only `id` is required. Aliases: `key`, `summary`, `link`, `body`.
 Non-zero exit = error (stderr tail is shown). Examples in `examples/`.
 
+Audit extras (all optional; see the help page's Audit tab): `status`
+(alias `state`), `done` (bool), `created`, `started`, `finished` (aliases
+`resolved`, `resolutiondate`). Dates in any common form: `2026-09-21`,
+`2026-09-21T09:30:00.000+0200`, `2026-09-21 09:30:00`, epoch s / ms. In
+audit mode the script gets `PAHIRI_AUDIT=1` and `PAHIRI_AUDIT_SINCE`.
+
+## Audit: my changes (`audit.gerrit_command`)
+
+JSON lines or an array: `change_id` (required), `number` (`_number`),
+`status`, `url`, `subject`, `project`, `branch`, `topic`, `created`
+(`createdOn`), `updated` (`lastUpdated`), `merged` (`submitted`), `labels`.
+Gets `PAHIRI_AUDIT_SINCE`. Applying an audit writes
+`<tasks>/.pahiri/audit/<time>.md` (created / updated / left alone).
+
+Agent answer (fixed): `MAP C:<n> -> <task> | why`, `MAP T:<ticket> ->
+<task> | why`, `NEW C:<n> [C:<n>…] -> <id> | title`, `SKIP C:<n> | why`.
+
 ## Gerrit status command
 
 Gets the Change-Ids as arguments (inline code using `$@` gets them as
@@ -126,7 +143,7 @@ Prompt = user template (placeholders `{{task}} {{task_dir}} {{context_file}}
   `CONTEXT_READY: yes` or `CONTEXT_READY: no - <what is missing>`.
 - checkpoints: only lines `- [ ] <step> (<estimate>)`, 3–12 of them.
 
-## CLI (for scripts and agents; default task `$PAHIRI_TASK`)
+## CLI (for scripts and agents; default task `$PAHIRI_TASK`, config `$PAHIRI_CONFIG`)
 
 ```
 pahiri task ready [--task ID] [--off]   flip context_ready
@@ -138,5 +155,7 @@ pahiri trash empty [--older-than 30d]   delete old trashed tasks
 pahiri report [--from D] [--to D] [--json]   tasks active in the range
 pahiri plan show [--date D] [--json]    day plan with each item's state
 pahiri plan add [--task ID] [--date D] <text [20m]>   add to the plan
+pahiri config add-workspace NAME PATH [--main B] | add-build NAME PATH
+pahiri config remove-workspace NAME | remove-build NAME | prune | list
 pahiri install-skills <DIR> [--force]   write bundled skills to DIR/<name>/SKILL.md
 ```

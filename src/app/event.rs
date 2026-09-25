@@ -47,6 +47,22 @@ pub enum JobEvent {
     },
     /// A background job finished: add this line to its log and mark it done.
     Finished(String),
+    /// The audit fetched tickets and changes.
+    AuditFetched {
+        /// First day looked at.
+        since: String,
+        /// Tickets with their source name.
+        tickets: Vec<(String, crate::tasks::Ticket)>,
+        /// Your changes.
+        changes: Vec<crate::tasks::sources::GerritStatus>,
+        /// What failed.
+        notes: Vec<String>,
+    },
+    /// The agent answered the audit.
+    AuditAgent {
+        /// Its stdout, or an error.
+        result: Result<String, String>,
+    },
     /// A one-shot agent call finished.
     Agent {
         /// Task id.

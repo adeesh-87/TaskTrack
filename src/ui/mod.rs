@@ -1,8 +1,10 @@
 //! Drawing. Everything here reads [`App`] state and paints it with ratatui.
 
+mod audit_view;
 mod config_page;
 mod plan_view;
 mod popup;
+mod task_card;
 mod task_list;
 mod task_view;
 pub mod theme;
@@ -20,6 +22,8 @@ pub use theme::Theme;
 
 /// Width of the left column as a percentage of the screen.
 pub const SIDEBAR_PERCENT: u16 = 20;
+/// Width of Home's board: wide enough for task titles.
+pub const BOARD_PERCENT: u16 = 32;
 
 /// Draw one frame.
 pub fn draw(frame: &mut Frame<'_>, app: &mut App) {
@@ -35,12 +39,27 @@ pub fn draw(frame: &mut Frame<'_>, app: &mut App) {
     match app.mode() {
         Mode::Settings(_) => config_page::draw(frame, app, main, &theme),
         Mode::Home => {
-            let [left, right] = split_columns(main);
+            let [left, right] =
+                Layout::horizontal([Constraint::Percentage(BOARD_PERCENT), Constraint::Min(10)])
+                    .areas(main);
             let board_focused = app.home_focus() == HomeFocus::Board;
             task_list::draw(frame, app, left, &theme, board_focused);
-            today::draw_today(frame, app, right, &theme);
+            // What the selected task is about, above the day.
+            let card = app.home_task().and_then(|id| app.record(&id).cloned());
+            let today_area = match &card {
+                Some(r) if right.height >= 16 => {
+                    let h = task_card::height(r, &theme).min(right.height / 2);
+                    let [c, t] =
+                        Layout::vertical([Constraint::Length(h), Constraint::Min(6)]).areas(right);
+                    task_card::draw(frame, r, c, &theme);
+                    t
+                }
+                _ => right,
+            };
+            today::draw_today(frame, app, today_area, &theme);
         }
         Mode::Plan(_) => plan_view::draw(frame, app, main, &theme),
+        Mode::Audit(_) => audit_view::draw(frame, app, main, &theme),
         Mode::Task => {
             let zoomed = app
                 .active_context()
@@ -145,6 +164,9 @@ fn draw_status_bar(frame: &mut Frame<'_>, app: &mut App, area: Rect, theme: &The
                 (f, true) => format!("filter: {f}▏ · Enter keep · Esc clear"),
                 _ => "Esc commands · F1 help · Enter open · p plan day · Tab today · / filter · J/K reorder · m timer · d delete".to_owned(),
             },
+            Mode::Audit(_) => {
+                "Space tick · Enter decide · A all/none · a apply · ? help · Esc leave".to_owned()
+            }
             Mode::Plan(_) => {
                 "Space pick · s suggest · a add · t add to task · Tab switch · J/K order · x remove · A all columns · Enter save · Esc cancel".to_owned()
             }
@@ -161,10 +183,9 @@ fn draw_status_bar(frame: &mut Frame<'_>, app: &mut App, area: Rect, theme: &The
             },
         },
     };
-    let mut spans = vec![Span::styled(
-        format!(" {hint} "),
-        Style::new().fg(theme.muted),
-    )];
+    // A message matters more than the key hints: it goes first, so a narrow
+    // bar cuts the hints instead.
+    let mut spans = Vec::new();
     if let Some(msg) = app.status() {
         spans.push(Span::styled(
             format!(" {msg} "),
@@ -177,6 +198,10 @@ fn draw_status_bar(frame: &mut Frame<'_>, app: &mut App, area: Rect, theme: &The
             Style::new().fg(theme.warning),
         ));
     }
+    spans.push(Span::styled(
+        format!(" {hint} "),
+        Style::new().fg(theme.muted),
+    ));
     let (right, right_style) = timer_chip(app, theme);
     let used: usize = spans.iter().map(|s| s.content.chars().count()).sum();
     let right_width = right.chars().count().min(area.width as usize);

@@ -213,7 +213,7 @@ impl App {
         match kind {
             PromptKind::Context => self.apply_context_answer(task_id, &path, &output),
             PromptKind::Checkpoints => self.apply_checkpoint_answer(task_id, &path, &output),
-            PromptKind::Coding => {}
+            PromptKind::Coding | PromptKind::Audit => {}
         }
     }
 

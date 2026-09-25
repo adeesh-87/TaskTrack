@@ -44,6 +44,7 @@ impl App {
             }
             Mode::Home => self.mouse_list(m),
             Mode::Plan(_) => self.mouse_plan(m),
+            Mode::Audit(_) => self.mouse_audit(m),
             Mode::Task => self.mouse_task(m),
         }
     }
@@ -182,6 +183,34 @@ impl App {
                     view.order_cursor = i;
                     if double {
                         view.remove_picked();
+                    }
+                }
+            }
+            _ => {}
+        }
+    }
+
+    /// Audit view: click selects, double-click decides / ticks, wheel moves.
+    fn mouse_audit(&mut self, m: MouseEvent) {
+        let row = UiState::list_row(self.ui.audit_list, &self.ui.audit_state, m.column, m.row);
+        let item = row.and_then(|r| self.ui.audit_rows.get(r).copied().flatten());
+        let double =
+            matches!(m.kind, MouseEventKind::Down(MouseButton::Left)) && self.is_double_click(m);
+        let Mode::Audit(view) = &mut self.mode else {
+            return;
+        };
+        let last = view.items.len().saturating_sub(1);
+        match m.kind {
+            MouseEventKind::ScrollUp => view.selected = view.selected.saturating_sub(1),
+            MouseEventKind::ScrollDown => view.selected = (view.selected + 1).min(last),
+            MouseEventKind::Down(MouseButton::Left) => {
+                if let Some(i) = item {
+                    view.selected = i;
+                    if double {
+                        self.handle_audit_key(KeyEvent::new(
+                            KeyCode::Char(' '),
+                            KeyModifiers::NONE,
+                        ));
                     }
                 }
             }

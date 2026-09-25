@@ -48,6 +48,12 @@ pub struct UiState {
     pub plan_order: Rect,
     /// Scroll state of the Plan view's right list.
     pub plan_order_state: ListState,
+    /// Audit view: the proposal list block (with border).
+    pub audit_list: Rect,
+    /// Scroll state of the audit list.
+    pub audit_state: ListState,
+    /// Audit list rows: the item each row shows (`None` for group headings).
+    pub audit_rows: Vec<Option<usize>>,
 }
 
 impl UiState {
@@ -65,6 +71,7 @@ impl UiState {
         self.today_items.clear();
         self.plan_pick = Rect::default();
         self.plan_order = Rect::default();
+        self.audit_list = Rect::default();
     }
 
     /// Row index of a click inside a bordered list, if any.

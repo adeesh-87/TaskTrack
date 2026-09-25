@@ -52,6 +52,10 @@ pub enum HookEvent {
     DayStart,
     /// The day plan was saved from the Plan view.
     PlanSave,
+    /// Every `periodic_minutes` (setting), for scripts that keep things in sync.
+    Periodic,
+    /// An audit was applied.
+    AuditApply,
 }
 
 /// Variables every hook gets.
@@ -77,11 +81,12 @@ pub const COMMON_ENV: &[(&str, &str)] = &[
     ("PAHIRI_BUILD_DIRS", "all of them as name=path;…"),
     ("PAHIRI_NEXT_CHECKPOINT", "next open checkpoint title"),
     ("PAHIRI_CONTEXT_READY", "yes / no"),
+    ("PAHIRI_MANUAL", "1 when you ran the hook by hand (Esc !)"),
 ];
 
 impl HookEvent {
     /// All events, in help order.
-    pub const ALL: [HookEvent; 19] = [
+    pub const ALL: [HookEvent; 21] = [
         Self::Startup,
         Self::TaskCreate,
         Self::TaskEnter,
@@ -101,6 +106,8 @@ impl HookEvent {
         Self::Gerrit,
         Self::DayStart,
         Self::PlanSave,
+        Self::Periodic,
+        Self::AuditApply,
     ];
 
     /// Name used in the config.
@@ -125,6 +132,8 @@ impl HookEvent {
             Self::Gerrit => "gerrit",
             Self::DayStart => "day_start",
             Self::PlanSave => "plan_save",
+            Self::Periodic => "periodic",
+            Self::AuditApply => "audit_apply",
         }
     }
 
@@ -157,6 +166,10 @@ impl HookEvent {
             Self::Gerrit => "Gerrit changes were scanned (Esc g)",
             Self::DayStart => "pahiri ran for the first time today (at start or past midnight)",
             Self::PlanSave => "the day plan was saved in the Plan view (p)",
+            Self::Periodic => {
+                "every Periodic hook (min) minutes (setting), e.g. to keep workspaces in sync"
+            }
+            Self::AuditApply => "an audit was applied (Esc U, then a)",
         }
     }
 
@@ -233,7 +246,12 @@ impl HookEvent {
                 ("PAHIRI_PLAN_ITEMS", "number of items"),
                 ("PAHIRI_PLAN_MINUTES", "minutes planned (open items)"),
             ],
-            Self::Startup | Self::Attach => &[],
+            Self::AuditApply => &[
+                ("PAHIRI_AUDIT_CREATED", "tasks created, space separated"),
+                ("PAHIRI_AUDIT_UPDATED", "tasks updated, space separated"),
+                ("PAHIRI_AUDIT_REPORT", "the report file (Markdown)"),
+            ],
+            Self::Startup | Self::Attach | Self::Periodic => &[],
         }
     }
 }

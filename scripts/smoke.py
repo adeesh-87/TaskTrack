@@ -49,10 +49,22 @@ open(agent, "w").write(
     "#!/bin/sh\nprompt=$(cat)\n"
     "case \"$prompt\" in\n"
     "  *'checklist only'*) printf -- '- [ ] Tiny warm-up (1m; spent 1m)\\n- [ ] Flux the capacitor (45m)\\n' ;;\n"
+    "  *'MAP C:'*) printf 'NEW C:501 -> dts-cleanup | Clean up the dts\\n' ;;\n"
     "  *) printf '### Goal\\n- make it flux\\n\\nCONTEXT_READY: yes\\n' ;;\n"
     "esac\n"
 )
 os.chmod(agent, 0o755)
+
+# The audit's "my changes": one for PROJ-42 (by topic), one nothing claims.
+mine = os.path.join(work, "gerrit-mine.sh")
+open(mine, "w").write(
+    "#!/bin/sh\n"
+    "echo '{\"change_id\":\"I5000000000000000000000000000000000000000\",\"number\":500,\"status\":\"NEW\","
+    "\"project\":\"fw\",\"topic\":\"PROJ-42\",\"subject\":\"Flux fix\",\"created\":\"2026-07-01 10:00:00\"}'\n"
+    "echo '{\"change_id\":\"I5010000000000000000000000000000000000000\",\"number\":501,\"status\":\"MERGED\","
+    "\"project\":\"fw\",\"subject\":\"Clean dts\",\"updated\":\"2026-07-05 10:00:00\"}'\n"
+)
+os.chmod(mine, 0o755)
 
 cfg = os.path.join(work, "config.toml")
 open(cfg, "w").write(
@@ -62,6 +74,7 @@ open(cfg, "w").write(
     f'[timer]\nbell = false\n'
     f'[[workspaces]]\nname = "fw"\npath = "{repo}"\n'
     f'[[task_sources]]\nname = "jira"\ncommand = "{jira}"\n'
+    f'[audit]\ngerrit_command = "{mine}"\n'
 )
 state = os.path.join(work, "state")
 
@@ -251,12 +264,25 @@ if "⏱ PROJ-42" not in text():
     failures.append("Enter in the Today pane did not start the timer")
 dump("timer from the plan", "▶")
 send("M", 0.5)                                 # M works from the Today pane too
+# The audit: Esc U → proposal (rules + the fake agent) → a → y.
+send("\x1b"); send("U", 0.3)
+wait_for("What it does")
+dump("audit view", "dts-cleanup")
+if "Flux fix" not in text():
+    failures.append("audit did not propose the PROJ-42 change")
+send("a", 0.5)
+dump("audit confirm", "Apply the audit?")
+send("y", 1.0)
+dump("audit applied", "audit applied: 1 created, 1 updated")
 send("\x1b"); send("q", 0.5)                   # quit → confirm (shell running)
 dump("quit confirm", "Quit pahiri?")
 send("y", 1.0)
 child.expect(pexpect.EOF, timeout=5)
 print("exit status", child.exitstatus)
 ctx = open(os.path.join(tasks, "PROJ-42", "CONTEXT.md")).read()
+dts = open(os.path.join(tasks, "dts-cleanup", "CONTEXT.md")).read()
+if "- gerrit: fw I501" not in dts or "- finished: 2026-07-05" not in dts:
+    failures.append("audit did not write dts-cleanup's CONTEXT.md")
 plans = os.path.join(tasks, ".pahiri", "plans")
 if not os.path.isdir(plans) or not os.listdir(plans):
     failures.append("no plan file written")

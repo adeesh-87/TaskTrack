@@ -14,6 +14,7 @@ pub mod timer;
 pub mod ui_state;
 
 mod agent;
+mod audit;
 mod clipboard;
 mod gerrit;
 mod help;
@@ -47,6 +48,7 @@ use crate::tasks::record::TaskRecord;
 use crate::tasks::{sources, TaskStore, Ticket};
 use crate::terminal::{keys, PtyEvent, ShellId};
 
+pub use self::audit::{change_line, AuditView};
 pub use self::config_form::ConfigForm;
 pub use self::context::{Focus, Shell, TaskContext};
 pub use self::event::{AppEvent, EventSender, JobEvent};
@@ -71,6 +73,8 @@ pub enum Mode {
     Home,
     /// Plan view: choosing today's work.
     Plan(PlanView),
+    /// Audit view: reviewing what the audit proposes.
+    Audit(Box<AuditView>),
     /// Task view: working inside one task.
     Task,
 }
@@ -148,6 +152,16 @@ pub struct App {
     home_focus: HomeFocus,
     /// Selected item of the Today pane.
     today_selected: usize,
+    /// Modification time of the config file as last loaded or saved.
+    config_mtime: Option<SystemTime>,
+    /// `--tasks-dir` given on the command line (survives config reloads).
+    tasks_dir_override: Option<PathBuf>,
+    /// When the `periodic` hook last ran (or pahiri started).
+    periodic_at: Instant,
+    /// The `periodic` hook is still running.
+    periodic_busy: bool,
+    /// The audit while the agent thinks about it.
+    audit_pending: Option<AuditView>,
     /// When the app started (for blinking).
     started: Instant,
     /// Last key press, paste or mouse event (idle check).
@@ -228,6 +242,11 @@ impl App {
             carry_hint: None,
             home_focus: HomeFocus::Board,
             today_selected: 0,
+            config_mtime: None,
+            tasks_dir_override: None,
+            periodic_at: Instant::now(),
+            periodic_busy: false,
+            audit_pending: None,
             started: Instant::now(),
             last_input: Instant::now(),
             hooks_running: 0,
@@ -241,9 +260,17 @@ impl App {
             leader_table,
             search: None,
         };
+        app.config_mtime = app.config_file_mtime();
         if matches!(app.mode, Mode::Home) {
             app.open_store();
             app.restore_session();
+            let before = app.status.take().unwrap_or_default();
+            let warned = app.with_warnings(before.clone());
+            if warned != before {
+                app.set_status(format!("{warned} · pahiri config prune drops it"));
+            } else if !before.is_empty() {
+                app.set_status(before);
+            }
             app.fire_hook(HookEvent::Startup, None, Vec::new(), AfterHook::Nothing);
             app.check_day();
         }
@@ -536,6 +563,7 @@ impl App {
         match self.mode {
             Mode::Settings(_) => self.handle_config_key(key),
             Mode::Plan(_) => self.handle_plan_key(key),
+            Mode::Audit(_) => self.handle_audit_key(key),
             Mode::Home => self.handle_list_key(key),
             Mode::Task => self.handle_task_key(key),
         }
@@ -591,7 +619,13 @@ impl App {
             | K::CodingArgs
             | K::CodingPrompt
             | K::CodingStartInCode => HelpTopic::Agents,
-            K::Hooks | K::HookTimeout => HelpTopic::Hooks,
+            K::AuditPrompt
+            | K::AuditGerrit
+            | K::AuditSince
+            | K::AuditAgent
+            | K::AuditDone
+            | K::AuditProgress => HelpTopic::Audit,
+            K::Hooks | K::HookTimeout | K::PeriodicMinutes => HelpTopic::Hooks,
             K::GerritUrl | K::GerritStatus => HelpTopic::Gerrit,
             K::Keys | K::LeaderKey | K::CopyCommand | K::PasteCommand => HelpTopic::Keys,
             K::FocusMinutes
@@ -646,6 +680,14 @@ impl App {
         }
         form.set_errors(Vec::new());
         form.mark_saved();
+        self.config_mtime = self.config_file_mtime();
+        self.apply_config(candidate);
+        let saved = format!("Saved {}", self.config_path.display());
+        self.set_status(self.with_warnings(saved));
+    }
+
+    /// Switch to `candidate` (saved on the Settings view or reloaded from disk).
+    fn apply_config(&mut self, candidate: Config) {
         let reopen = candidate.categories != self.config.categories
             || candidate.tasks_dir != self.config.tasks_dir
             || candidate.status_file != self.config.status_file
@@ -656,6 +698,9 @@ impl App {
         if reopen || self.store.is_none() {
             self.contexts.clear();
             self.active_task = None;
+            if matches!(self.mode, Mode::Task | Mode::Plan(_)) {
+                self.mode = Mode::Home;
+            }
             self.open_store();
         } else {
             // Attachments may now resolve to different paths.
@@ -665,7 +710,91 @@ impl App {
                 let _ = ctx.refresh_env(&cfg, &state);
             }
         }
-        self.set_status(format!("Saved {}", self.config_path.display()));
+    }
+
+    /// `msg`, plus the first config warning (missing workspace / build folders).
+    fn with_warnings(&self, msg: String) -> String {
+        let warnings = self.config.warnings();
+        match warnings.first() {
+            None => msg,
+            Some(w) if msg.is_empty() => format!("{w}{}", more(warnings.len())),
+            Some(w) => format!("{msg} · {w}{}", more(warnings.len())),
+        }
+    }
+
+    fn config_file_mtime(&self) -> Option<SystemTime> {
+        std::fs::metadata(&self.config_path)
+            .and_then(|m| m.modified())
+            .ok()
+    }
+
+    /// `--tasks-dir` for this run: kept when the config is reloaded from disk.
+    pub fn set_tasks_dir_override(&mut self, dir: PathBuf) {
+        self.tasks_dir_override = Some(dir);
+    }
+
+    /// The config file changed on disk (a hook, `pahiri config …`, an editor):
+    /// load it. Unsaved edits on the Settings view win until you leave it.
+    pub(super) fn reload_config_if_changed(&mut self) {
+        let mtime = self.config_file_mtime();
+        if mtime.is_none() || mtime == self.config_mtime {
+            return;
+        }
+        if matches!(&self.mode, Mode::Settings(f) if f.dirty() || f.first_run()) {
+            self.set_status(
+                "config.toml changed on disk · Ctrl+S here overwrites it, Esc (discard) loads it",
+            );
+            return;
+        }
+        self.config_mtime = mtime;
+        let mut loaded = match Config::load(&self.config_path) {
+            Ok(Some(c)) => c,
+            Ok(None) => return,
+            Err(e) => {
+                warn!("config reload: {e}");
+                self.set_status(format!(
+                    "config.toml changed but cannot be read ({e}) · keeping the previous settings"
+                ));
+                return;
+            }
+        };
+        if let Some(dir) = &self.tasks_dir_override {
+            loaded.tasks_dir.clone_from(dir);
+        }
+        if loaded == self.config {
+            return;
+        }
+        let errors = loaded.validate();
+        if let Some(first) = errors.first() {
+            self.set_status(format!(
+                "config.toml changed but {first}{} · keeping the previous settings",
+                if errors.len() > 1 { " (and more)" } else { "" }
+            ));
+            return;
+        }
+        let was = (self.config.workspaces.len(), self.config.builds.len());
+        self.apply_config(loaded);
+        if let Mode::Settings(form) = &self.mode {
+            let selected = form.selected();
+            let mut fresh = ConfigForm::new(&self.config, false);
+            fresh.select(selected);
+            self.mode = Mode::Settings(fresh);
+        }
+        let now = (self.config.workspaces.len(), self.config.builds.len());
+        let msg = format!(
+            "config reloaded from disk · workspaces {}{} · builds {}{}",
+            now.0,
+            change(was.0, now.0),
+            now.1,
+            change(was.1, now.1)
+        );
+        // Keep what is already said (typically the hook that changed the config).
+        let msg = match self.status.take() {
+            Some(prev) if !prev.is_empty() => format!("{prev} · {msg}"),
+            _ => msg,
+        };
+        let msg = self.with_warnings(msg);
+        self.set_status(msg);
     }
 
     fn leave_config(&mut self) {
@@ -1264,6 +1393,8 @@ impl App {
             Action::Save => self.save_editor(),
             Action::CloseEditor => self.close_editor(),
             Action::Help => self.open_help(HelpTopic::Keys),
+            Action::RunHook => self.open_run_hook_menu(),
+            Action::Audit => self.start_audit(),
             Action::DeleteTask => self.request_delete_task(),
             Action::Timer => self.open_timer_menu(),
             Action::StopTimer => self.stop_timer(),
@@ -1588,6 +1719,19 @@ impl App {
                 found,
                 scanned,
             } => self.handle_gerrit(&task_id, found, scanned),
+            JobEvent::AuditFetched {
+                since,
+                tickets,
+                changes,
+                notes,
+            } => {
+                if matches!(self.popup, Some(Popup::Log { .. })) {
+                    self.audit_fetched(since, tickets, changes, notes);
+                } else {
+                    self.set_status("audit cancelled");
+                }
+            }
+            JobEvent::AuditAgent { result } => self.audit_agent_done(result),
             JobEvent::Agent {
                 task_id,
                 kind,
@@ -2822,13 +2966,24 @@ impl App {
             }
             Pending::EditPrompt(kind) => self.edit_prompt(kind),
             Pending::TimerStart(id) => self.start_timer(&id, None),
-            Pending::PlanDiscard => self.mode = Mode::Home,
+            Pending::PlanDiscard | Pending::AuditDiscard => self.mode = Mode::Home,
             Pending::PlanAdd(task) => {
                 if let Some(text) = input {
                     self.plan_add(task, &text);
                 }
             }
             Pending::PlanStart(i) => self.start_plan_item(i),
+            Pending::RunHook(name) => self.run_hook_now(&name),
+            Pending::AuditApply => self.apply_audit(),
+            p @ (Pending::AuditAttachAsk(_)
+            | Pending::AuditAttach(..)
+            | Pending::AuditNewAsk(_)
+            | Pending::AuditNew(_)
+            | Pending::AuditLeave(_)
+            | Pending::AuditTicketAsk(_)
+            | Pending::AuditTicketTo(..)
+            | Pending::AuditRenameAsk(_)
+            | Pending::AuditRename(_)) => self.audit_pending_action(p, input.as_deref()),
             Pending::StartFocusAsk(id) => {
                 self.popup = Some(Popup::input(
                     "Focus block",
@@ -2983,6 +3138,24 @@ fn move_in_editor(ed: &mut Buffer, code: KeyCode, word: bool, shift: bool, heigh
         KeyCode::End => ed.end(),
         KeyCode::PageUp => ed.page_up(height),
         _ => ed.page_down(height),
+    }
+}
+
+/// ` (+2 more)` after the first of `n` warnings.
+fn more(n: usize) -> String {
+    if n > 1 {
+        format!(" (+{} more)", n - 1)
+    } else {
+        String::new()
+    }
+}
+
+/// ` (+2)` / ` (−1)` / nothing, for "reloaded" messages.
+fn change(was: usize, now: usize) -> String {
+    match now.cmp(&was) {
+        std::cmp::Ordering::Greater => format!(" (+{})", now - was),
+        std::cmp::Ordering::Less => format!(" (−{})", was - now),
+        std::cmp::Ordering::Equal => String::new(),
     }
 }
 

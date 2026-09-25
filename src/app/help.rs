@@ -24,6 +24,8 @@ pub enum HelpTopic {
     Sources,
     /// Gerrit.
     Gerrit,
+    /// The audit.
+    Audit,
     /// Command line.
     Cli,
     /// Files pahiri reads and writes.
@@ -34,13 +36,14 @@ pub enum HelpTopic {
 
 impl HelpTopic {
     /// All tabs.
-    pub const ALL: [HelpTopic; 9] = [
+    pub const ALL: [HelpTopic; 10] = [
         Self::Keys,
         Self::Work,
         Self::Agents,
         Self::Hooks,
         Self::Sources,
         Self::Gerrit,
+        Self::Audit,
         Self::Cli,
         Self::Files,
         Self::Troubleshooting,
@@ -55,6 +58,7 @@ impl HelpTopic {
             Self::Hooks => "Hooks",
             Self::Sources => "Jira / Orbit",
             Self::Gerrit => "Gerrit",
+            Self::Audit => "Audit",
             Self::Cli => "CLI",
             Self::Files => "Files",
             Self::Troubleshooting => "Trouble",
@@ -66,6 +70,62 @@ impl HelpTopic {
         Self::ALL.iter().position(|t| *t == self).unwrap_or(0)
     }
 }
+
+/// The Audit tab: how matching works and what the scripts print.
+pub const AUDIT_HELP: &str = "\
+THE AUDIT (Esc U)
+Fetches your tickets (every task source) and your Gerrit changes, matches them
+to your tasks and shows a proposal in the Audit view. Nothing changes until you
+press a there.
+
+HOW THINGS ARE MATCHED
+  ticket → task   same id as the task folder, or the same link
+  change → task   its Change-Id is on the task's - gerrit: line; its topic or branch
+                  is a task id, task branch or ticket id; or its subject names a
+                  ticket key (PROJ-42)
+  the rest        the agent decides (setting: Audit: use the agent), then you
+  done            ticket status Done / Closed / Resolved / … (+ Audit: done statuses)
+                  or \"done\": true; without a ticket: all changes merged or abandoned
+  dates           from the ticket, else the changes (first upload, last merge).
+                  Earlier dates win for created / started; finished fills a gap.
+
+THE AUDIT VIEW
+  ↑/↓ select · Space tick / untick · A all / none · a apply · Esc leave
+  Enter on an unmatched change: attach it to a task, make a new task, leave it.
+  Enter on a new task: rename it, or record its ticket on an existing task.
+Applying creates tasks in the right column (CONTEXT.md with title, link,
+## Description, - gerrit: lines and dates), updates existing ones (link, empty
+description, changes and their status, dates, done → last column), adds an
+\"audit: …\" line to each ## Log, writes <tasks>/.pahiri/audit/<time>.md and runs the
+audit_apply hook. Then Esc i on a task lets the agent write its ## Context.
+
+TICKET SCRIPTS (your task sources) IN AUDIT MODE
+  They run with PAHIRI_AUDIT=1 and PAHIRI_AUDIT_SINCE=YYYY-MM-DD: then include
+  finished tickets updated since that day. Extra fields, all optional:
+    status     In Progress, Done, …        (alias state)
+    done       true / false                (wins over status)
+    created    a date: 2026-09-21 · 2026-09-21T09:30:00.000+0200 · 2026-09-21 09:30:00
+               · epoch seconds or milliseconds
+    started
+    finished   (aliases resolved, resolutiondate)
+  {\"id\":\"PROJ-42\",\"title\":\"Fix login\",\"url\":\"https://jira/browse/PROJ-42\",
+   \"status\":\"Done\",\"created\":\"2026-07-01T09:00:00.000+0000\",
+   \"finished\":\"2026-08-02T17:00:00.000+0000\"}
+  examples/jira.sh does this.
+
+GERRIT COMMAND (setting: Audit: Gerrit command)
+  Prints your changes since $PAHIRI_AUDIT_SINCE: JSON lines or a JSON array of
+    change_id (required) · number (_number) · status · url · subject · project
+    · branch · topic · created (createdOn) · updated (lastUpdated) · merged (submitted)
+  {\"change_id\":\"I0123…\",\"number\":12345,\"status\":\"MERGED\",\"project\":\"fw\",
+   \"topic\":\"PROJ-42\",\"subject\":\"Fix token refresh\",
+   \"created\":\"2026-07-02 10:00:00\",\"merged\":\"2026-07-09 16:00:00\"}
+  examples/gerrit-mine.sh does this over ssh (gerrit query owner:self).
+
+THE AGENT'S ANSWER (fixed; the prompt template is audit.md, Esc E edits it)
+  MAP C:<change> -> <task> | why        NEW C:<change> [C:…] -> <new-id> | title
+  MAP T:<ticket> -> <task> | why        SKIP C:<change> | why
+";
 
 /// Shown on the Jira / Orbit tab (and after a failed test run).
 pub const TASK_SOURCE_FORMAT: &str = "\
@@ -212,12 +272,13 @@ impl App {
                 }
                 out.push_str("  Esc palette · leader twice sends the leader key to the shell\n\n");
                 out.push_str(
-                    "VIEWS  Home (board + Today) · Plan · Task · Settings · Help (this overlay)\n\n\
+                    "VIEWS  Home (board + task card + Today) · Plan · Audit · Task · Settings · Help (this overlay)\n\n\
                      HOME: BOARD\n  ↑/↓ j/k move · Enter open · J/K (Shift+↑/↓) reorder in column · [ ] move column\n  \
                      / filter by id or title · A show/hide archived · d delete · n new · m timer · v done\n  \
                      p plan the day · Tab → Today\n\n\
                      HOME: TODAY\n  ↑/↓ move · Enter start the timer · Space tick · J/K order · x remove · o open task\n  \
                      p plan · Tab → board\n\n\
+                     AUDIT (Esc U)\n  Space tick · Enter decide / rename · A all/none · a apply · Esc leave (F1 → Audit)\n\n\
                      PLAN\n  Space pick · s suggest · a add a free item · t add one for the task · Tab/←→ sides\n  \
                      J/K order · x remove · A all columns · Enter save · Esc cancel\n\n\
                      PANES (task view)\n  Ctrl+Tab / Ctrl+Shift+Tab or Alt+] / Alt+[   next / previous pane\n  \
@@ -348,6 +409,11 @@ impl App {
                      Hooks change pahiri by editing files or calling `$PAHIRI_BIN task …`\n\
                      (ready, log, move, outcome, next); pahiri reloads CONTEXT.md, the board and\n\
                      the file tree when they change. A failing hook only shows a status line.\n\n\
+                     Esc ! runs a hook now (PAHIRI_MANUAL=1), e.g. startup after you cloned a repo.\n\
+                     config.toml is reloaded when it changes on disk, so a hook can change settings\n\
+                     with `$PAHIRI_BIN config add-workspace|add-build|prune …` — see\n\
+                     examples/hooks/discover-workspaces.sh, which fills in workspaces and yocto builds\n\
+                     from what is on disk.\n\n\
                      EVENTS\n",
                 );
                 for e in HookEvent::ALL {
@@ -408,6 +474,24 @@ impl App {
                 );
             }
             HelpTopic::Sources => out.push_str(TASK_SOURCE_FORMAT),
+            HelpTopic::Audit => {
+                let _ = writeln!(
+                    out,
+                    "now: looks back {} days · Gerrit command = {} · agent: {}\n",
+                    cfg.audit.since_days,
+                    if cfg.audit.gerrit_command.trim().is_empty() {
+                        "(not set)"
+                    } else {
+                        cfg.audit.gerrit_command.trim()
+                    },
+                    if cfg.audit.use_agent && !cfg.agent.command.trim().is_empty() {
+                        "yes"
+                    } else {
+                        "no (rules only)"
+                    }
+                );
+                out.push_str(AUDIT_HELP);
+            }
             HelpTopic::Gerrit => {
                 let _ = writeln!(
                     out,
@@ -436,6 +520,11 @@ impl App {
                  pahiri report [--from D] [--to D] [--json]   tasks active in a range (reviews)\n  \
                  pahiri plan show [--date D] [--json]         the day plan with each item's state\n  \
                  pahiri plan add [--task ID] <text 20m>       add to today's plan\n  \
+                 pahiri config add-workspace NAME PATH [--main B]   add / update a workspace\n  \
+                 pahiri config add-build NAME PATH            add / update a vendor build\n  \
+                 pahiri config remove-workspace|remove-build NAME\n  \
+                 pahiri config prune                          drop entries whose folder is gone\n  \
+                 pahiri config list                           workspaces and builds, tab separated\n  \
                  pahiri trash empty [--older-than 30d]        delete old trashed tasks\n  \
                  pahiri install-skills <dir> [--force]        write the bundled agent skills\n  \
                  pahiri --show-config             config, log and state paths\n\n\

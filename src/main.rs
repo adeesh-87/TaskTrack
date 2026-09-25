@@ -56,6 +56,12 @@ enum Cmd {
         #[arg(long)]
         json: bool,
     },
+    /// Change code workspaces and vendor builds in the config (for scripts and
+    /// hooks; a running pahiri reloads the config when it changes).
+    Config {
+        #[command(subcommand)]
+        cmd: ConfigCmd,
+    },
     /// The day plan (<tasks>/.pahiri/plans/<date>.md) for scripts and agents.
     Plan {
         #[command(subcommand)]
@@ -150,6 +156,41 @@ enum PlanCmd {
 }
 
 #[derive(Debug, Subcommand)]
+enum ConfigCmd {
+    /// Add a code workspace, or update the path / branch of the one with this name.
+    AddWorkspace {
+        /// Short name (one word).
+        name: String,
+        /// The git checkout.
+        path: PathBuf,
+        /// Its main branch (default: what git reports for a new workspace).
+        #[arg(long)]
+        main: Option<String>,
+    },
+    /// Add a vendor build folder, or update the path of the one with this name.
+    AddBuild {
+        /// Short name (one word).
+        name: String,
+        /// The build folder.
+        path: PathBuf,
+    },
+    /// Remove a code workspace.
+    RemoveWorkspace {
+        /// Its name.
+        name: String,
+    },
+    /// Remove a vendor build.
+    RemoveBuild {
+        /// Its name.
+        name: String,
+    },
+    /// Remove workspaces and builds whose folder no longer exists.
+    Prune,
+    /// Print workspaces and builds (kind, name, path, main branch; tab separated).
+    List,
+}
+
+#[derive(Debug, Subcommand)]
 enum TrashCmd {
     /// Delete trashed tasks older than the given age.
     Empty {
@@ -161,6 +202,23 @@ enum TrashCmd {
 
 fn run_command(cmd: Cmd, config: Option<&Config>, config_path: &std::path::Path) -> Result<()> {
     use pahiri::cli;
+    if let Cmd::Config { cmd } = &cmd {
+        let out = match cmd {
+            ConfigCmd::AddWorkspace { name, path, main } => {
+                cli::config_add_workspace(config_path, name, path, main.clone())?
+            }
+            ConfigCmd::AddBuild { name, path } => cli::config_add_build(config_path, name, path)?,
+            ConfigCmd::RemoveWorkspace { name } => cli::config_remove(config_path, false, name)?,
+            ConfigCmd::RemoveBuild { name } => cli::config_remove(config_path, true, name)?,
+            ConfigCmd::Prune => cli::config_prune(config_path)?,
+            ConfigCmd::List => match config {
+                Some(cfg) => cli::config_list(cfg),
+                None => String::new(),
+            },
+        };
+        println!("{out}");
+        return Ok(());
+    }
     if let Cmd::InstallSkills { dir, force } = &cmd {
         let dir = Config::expand_tilde(&dir.display().to_string());
         print!("{}", cli::install_skills(&dir, *force)?);
@@ -194,7 +252,7 @@ fn run_command(cmd: Cmd, config: Option<&Config>, config_path: &std::path::Path)
         Cmd::Trash {
             cmd: TrashCmd::Empty { older_than },
         } => cli::trash_empty(cfg, &older_than)?,
-        Cmd::InstallSkills { .. } => unreachable!("handled above"),
+        Cmd::InstallSkills { .. } | Cmd::Config { .. } => unreachable!("handled above"),
     };
     println!("{out}");
     Ok(())
@@ -223,12 +281,20 @@ fn main() -> Result<()> {
     let cli = Cli::parse();
     let log_path = init_logging(&cli.log_level);
 
-    let config_path = match cli.config {
+    // Commands run from hooks and pahiri shells use the config of the pahiri
+    // that started them ($PAHIRI_CONFIG) unless --config says otherwise.
+    let from_env = cli
+        .cmd
+        .as_ref()
+        .and_then(|_| std::env::var_os("PAHIRI_CONFIG"))
+        .filter(|p| !p.is_empty())
+        .map(PathBuf::from);
+    let config_path = match cli.config.or(from_env) {
         Some(p) => p,
         None => Config::default_path().context("cannot determine a config directory")?,
     };
     let mut config = Config::load(&config_path)?;
-    if let Some(dir) = cli.tasks_dir {
+    if let Some(dir) = &cli.tasks_dir {
         let mut cfg = config.take().unwrap_or_default();
         cfg.tasks_dir = Config::expand_tilde(&dir.display().to_string());
         config = Some(cfg);
@@ -254,13 +320,23 @@ fn main() -> Result<()> {
     }
 
     info!("starting pahiri, config at {}", config_path.display());
+    // Shells, agents and hooks inherit it, so `pahiri task …` / `pahiri config …`
+    // run inside them use this config. Set before any thread starts.
+    std::env::set_var("PAHIRI_CONFIG", &config_path);
     let state_dir = Config::state_dir()
         .unwrap_or_else(std::env::temp_dir)
         .join("run");
     std::fs::create_dir_all(&state_dir)
         .with_context(|| format!("creating {}", state_dir.display()))?;
     let (tx, rx) = EventSender::channel();
+    let tasks_dir_override = cli
+        .tasks_dir
+        .as_ref()
+        .map(|d| Config::expand_tilde(&d.display().to_string()));
     let mut app = App::new(config, config_path, state_dir, tx.clone());
+    if let Some(dir) = tasks_dir_override {
+        app.set_tasks_dir_override(dir);
+    }
 
     let mut terminal = ratatui::try_init().context("initialising terminal")?;
     let _ = execute!(io::stdout(), EnableBracketedPaste);

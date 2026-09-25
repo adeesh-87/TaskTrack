@@ -204,21 +204,34 @@ pub fn draw_today(frame: &mut Frame<'_>, app: &mut App, area: Rect, theme: &Them
             let what = match r.next_checkpoint() {
                 Some(c) => {
                     let done = r.checkpoints.iter().filter(|c| c.done).count();
-                    vec![
-                        Span::raw(format!("{} ", c.title)),
-                        Span::styled(
-                            format!(
-                                "({}) · {done}/{}",
-                                fmt_minutes(c.estimate_min),
-                                r.checkpoints.len()
-                            ),
-                            muted,
+                    let mut spans = Vec::new();
+                    // What the task is, then its next step.
+                    if !r.title.is_empty() {
+                        spans.push(Span::raw(shorten_end(&r.title, (width / 3).max(12))));
+                        spans.push(Span::styled(" · next: ", muted));
+                    }
+                    spans.push(Span::raw(format!("{} ", c.title)));
+                    spans.push(Span::styled(
+                        format!(
+                            "({}) · {done}/{}",
+                            fmt_minutes(c.estimate_min),
+                            r.checkpoints.len()
                         ),
-                    ]
+                        muted,
+                    ));
+                    spans
                 }
-                None if !r.checkpoints.is_empty() => {
-                    vec![Span::styled("all checkpoints done → ] to finish", muted)]
-                }
+                None if !r.checkpoints.is_empty() => vec![
+                    Span::raw(shorten_end(&r.title, (width / 3).max(12))),
+                    Span::styled(
+                        if r.title.is_empty() {
+                            "all checkpoints done → ] to finish"
+                        } else {
+                            " · all checkpoints done → ] to finish"
+                        },
+                        muted,
+                    ),
+                ],
                 None if r.context_ready => vec![Span::styled(
                     "context ready · Esc b plans checkpoints",
                     Style::new().fg(theme.warning),

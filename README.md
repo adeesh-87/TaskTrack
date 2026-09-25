@@ -22,8 +22,9 @@ board, with a vim-style command palette on `Esc`.
 
 | view | what | how |
 | ---- | ---- | --- |
-| **Home** | the **Board** (columns of tasks, left) and the **Today** pane (your plan for the day, what is timed, time booked, open work) | start, `Esc T` |
+| **Home** | the **Board** (columns of tasks, left), the **Task card** (what the selected task is: title, goal, link, its CRs, progress) and the **Today** pane (your plan, what is timed, time booked, open work) | start, `Esc T` |
 | **Plan** | choose today's work: pick checkpoints of the tasks in progress, order them | `p` on Home, `Esc y` anywhere |
+| **Audit** | review what the audit proposes: tasks to create, tasks to update, changes to place | `Esc U` |
 | **Task** | one task: Files, Editor, Shells and Terminal panes | `Enter` on a task |
 | **Settings** | the settings form | `Esc c`, `,` on Home |
 | **Help** | an overlay on any view | `F1`, `?` |
@@ -82,6 +83,8 @@ filter, `Enter` to run, `Esc` to close.
 | `D` | delete the task (moved to `.trash`) |
 | `T` | back to Home |
 | `y` | plan your day (the Plan view; `p` on Home) |
+| `U` | audit: match your tickets and Gerrit changes to tasks |
+| `!` | run a hook now (e.g. re-run `startup`) |
 | `p` | **prepare**: commit, pull main, switch attached repos to the task branch |
 | `a` | **attach** code workspaces / vendor builds to the task |
 | `s` / `x` | new shell / close selected shell |
@@ -225,6 +228,12 @@ pahiri's job is that you always know what to do next.
   capacity* (6h) is full, with estimates scaled by your pace. `a` adds a
   free item (`Email the vendor 15m`), `t` an item for the task under the
   cursor. On the right, `J`/`K` order and `x` removes. `Enter` saves.
+* **Task card.** Above the Today pane, Home shows the selected task (on
+  the board, or the plan item's task): its title, one line of what it is
+  (the `### Goal` of its AI context, else the first line of its
+  description), the ticket link, its Gerrit changes with their status,
+  and the next checkpoint, progress and dates. The Today pane's open work
+  lists each task's title next to its next step.
 * **Today.** Home's right side shows the plan: `Tab` moves there, `Enter`
   starts the timer on an item, `Space` ticks it (a checkpoint is ticked in
   its task's `CONTEXT.md` — one source of truth), `J`/`K` reorder, `x`
@@ -282,7 +291,8 @@ timer_start  = "~/src/pahiri/examples/hooks/start-moves-task.sh"
 Events: `startup`, `task_create`, `task_enter`, `task_leave`,
 `task_move`, `task_delete`, `attach`, `prepare_done`, `timer_start`,
 `timer_pause`, `timer_resume`, `timer_stop`, `timer_expire`,
-`checkpoint_done`, `context_generated`, `checkpoints_generated`, `gerrit`.
+`checkpoint_done`, `context_generated`, `checkpoints_generated`, `gerrit`,
+`day_start`, `plan_save`, `periodic`, `audit_apply`.
 Every hook gets `PAHIRI_TASK`, `PAHIRI_TASK_DIR`, `PAHIRI_CONTEXT_FILE`,
 `PAHIRI_COLUMN`, `PAHIRI_CODE_DIR(S)`, `PAHIRI_BIN` and more; each event
 adds its own (e.g. `PAHIRI_FROM_COLUMN` / `PAHIRI_FINISHED` for
@@ -291,6 +301,83 @@ and `task_create` are waited for; the rest run in the background. Hooks
 talk back through files and `$PAHIRI_BIN task …`; pahiri picks up changes
 to the board, the task folders, `CONTEXT.md` and the file tree within a
 second. Ready-made ones are in `examples/hooks/`.
+
+**Run a hook now:** `Esc !` lists your hooks and runs the one you pick for
+the current task (with `PAHIRI_MANUAL=1`) — e.g. re-run `startup` after
+you cloned a repo.
+
+**Config changes on the fly.** pahiri reloads `config.toml` within a second
+when it changes on disk — from a hook, `pahiri config …`, or your editor.
+A file with errors is ignored (the status line says why) and the previous
+settings stay; unsaved edits on the Settings view win until you leave it.
+A workspace or build whose folder is missing is only a warning, so pahiri
+still starts; `pahiri config prune` drops them.
+
+**Example: workspaces and builds from what is on disk.**
+`examples/hooks/discover-workspaces.sh` finds git checkouts (folders with a
+`.git`, skipping ones nested in another checkout) and bitbake/yocto build
+folders (with `conf/local.conf`), registers them with `pahiri config
+add-workspace` / `add-build`, and prunes the ones that are gone:
+
+```toml
+[hooks]
+startup = "CODE_ROOTS=~/src:~/work BUILD_ROOTS=~/yocto ~/src/pahiri/examples/hooks/discover-workspaces.sh"
+```
+
+Names come from the folder (`parent-name` when two share one); a new
+workspace gets the main branch git reports. Existing entries keep their
+name and branch, and a folder you registered under another name is not
+added twice.
+
+To keep it in sync without thinking about it, run it on a timer too: the
+`periodic` hook runs every *Periodic hook (min)* minutes (setting
+`periodic_minutes`, 0 = off; one run at a time):
+
+```toml
+periodic_minutes = 10
+
+[hooks]
+startup  = "~/src/pahiri/examples/hooks/discover-workspaces.sh"
+periodic = "~/src/pahiri/examples/hooks/discover-workspaces.sh"
+```
+
+The script only writes when something changed, so pahiri reloads only
+then. `Esc !` → `startup` runs it right now.
+
+## Audit: tickets and changes → tasks
+
+`Esc U` fetches your tickets (every task source, run with
+`PAHIRI_AUDIT=1` and `PAHIRI_AUDIT_SINCE=<date>` so they include finished
+ones) and your Gerrit changes (*Audit: Gerrit command*,
+`examples/gerrit-mine.sh`), and matches them to your tasks:
+
+* a ticket belongs to the task with its id or its link;
+* a change belongs to the task that already lists its `Change-Id`, whose
+  id / branch / ticket its topic or branch names, or whose ticket key
+  (`PROJ-42`) is in its subject;
+* what is left goes to your AI agent (*Audit: use the agent*), which maps
+  changes to tasks, groups changes into new tasks, or maps a ticket to a
+  task you made by hand — marked `AI` in the proposal.
+
+The **Audit view** lists the proposal: new tasks (in the right column:
+done tickets and merged-only change groups go to the last one), updates
+(new changes and status changes, link, empty description, earlier
+created / started dates, finished date, done → last column) and changes
+nothing claimed. `Space` ticks, `Enter` decides (attach a change to a
+task, make a task for it, leave it; rename a new task; record a ticket on
+an existing task), `a` applies. Applying writes each task's
+`CONTEXT.md` — title, link, `## Description`, `- gerrit:` lines, dates —
+adds an `audit: …` line to its `## Log`, updates the board, writes a
+report to `<tasks>/.pahiri/audit/` and runs the `audit_apply` hook.
+Running it again only proposes what changed. Then `Esc i` in a task lets
+the agent write its `## Context`. Formats: help page → Audit.
+
+| setting | default | |
+| ------- | ------- | - |
+| `audit.gerrit_command` | "" | prints your changes (JSON lines) |
+| `audit.since_days` | 90 | how far back |
+| `audit.use_agent` | true | let the agent place what the rules could not |
+| `audit.done_statuses` / `audit.progress_statuses` | [] | your workflow's extra status names |
 
 ## AI agents
 
@@ -359,6 +446,11 @@ pahiri task outcome "shipped the fix; root cause was a stale token"
 pahiri report --from 2026-01-01 --to 2026-06-30 [--json]
 pahiri plan show [--date D] [--json]  # today's plan with each item's state
 pahiri plan add [--task ID] Reply to review 20m
+pahiri config add-workspace fw ~/src/fw [--main develop]   # add or update
+pahiri config add-build imx ~/yocto/build-imx
+pahiri config remove-workspace fw | remove-build imx
+pahiri config prune                  # drop workspaces / builds whose folder is gone
+pahiri config list                   # kind, name, path, main branch (tab separated)
 pahiri trash empty --older-than 30d
 pahiri install-skills <dir> [--force]
 ```
@@ -471,6 +563,7 @@ Config: `~/.config/pahiri/config.toml`. Logs and generated shell files:
 | `gerrit_status_command` | "" | reports change status; format on the help page |
 | `hooks` | {} | `event = "command"`, see *Hooks* |
 | `hook_timeout_secs` | 15 | |
+| `periodic_minutes` | 0 | run the `periodic` hook this often (0: never) |
 | `keys` | {} | `"palette.timer" = "u"`, `"leader.coding_agent" = "A"` — names on the help page |
 | `archive_after_days` | 14 | hide finished tasks older than this (0: never) |
 | `soft_wrap` | true | wrap Markdown and text in the editor |
@@ -516,6 +609,7 @@ one, `d` deletes. Workspaces are written as `name = /path @main-branch`
 | ----- | ---- |
 | Home: board | `↑/↓` move · `Enter` open · `J`/`K` reorder · `[`/`]` move task · `/` filter · `A` archived · `n` new · `d` delete · `m` timer · `v` checkpoint done · `O` outcome · `p` plan · `Tab` Today · `q` quit |
 | Home: Today | `↑/↓` move · `Enter` timer · `Space` tick · `J`/`K` order · `x` remove · `o` open task · `p` plan · `Tab` board |
+| Audit | `Space` tick · `Enter` decide / rename · `A` all/none · `a` apply · `Esc` leave |
 | Plan | `Space` pick · `s` suggest · `a` / `t` add · `Tab` / `←→` switch sides · `J`/`K` order · `x` remove · `A` all columns · `Enter` save · `Esc` cancel |
 | files | `Enter` open/toggle · `←/→` collapse/expand · `a`/`A` new file/folder · `r` rename · `d` delete · `.` hidden · `t` shell |
 | shells | `Enter` focus · `n` new · `x` close · `←` hide pane |

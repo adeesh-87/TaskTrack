@@ -110,6 +110,70 @@ pub fn parse_rfc3339(ts: &str) -> Option<u64> {
     u64::try_from(days * 86_400 + h * 3600 + mi * 60 + s).ok()
 }
 
+/// Parse the dates ticket and review tools print into epoch seconds (UTC):
+/// `2026-09-21`, `2026-09-21T09:30:00Z`, `2026-09-21T09:30:00.000+0200`,
+/// `2026-09-21 09:30:00.000000000` (Gerrit, UTC), `…+02:00`, `… UTC`,
+/// and plain epoch seconds or milliseconds.
+pub fn parse_loose(ts: &str) -> Option<u64> {
+    let t = ts.trim();
+    if !t.is_empty() && t.bytes().all(|b| b.is_ascii_digit()) {
+        let n: u64 = t.parse().ok()?;
+        return Some(if t.len() >= 13 { n / 1000 } else { n });
+    }
+    let b = t.as_bytes();
+    if b.len() < 10 || b[4] != b'-' || b[7] != b'-' {
+        return None;
+    }
+    let num = |s: &str| s.parse::<i64>().ok();
+    let days = days_from_civil(num(t.get(0..4)?)?, num(t.get(5..7)?)?, num(t.get(8..10)?)?);
+    let mut rest = &t[10..];
+    let mut secs = 0i64;
+    if let Some(r) = rest.strip_prefix(['T', ' ']) {
+        let time_len = r
+            .bytes()
+            .take_while(|c| c.is_ascii_digit() || *c == b':')
+            .count();
+        let parts: Vec<i64> = r[..time_len]
+            .split(':')
+            .map(num)
+            .collect::<Option<Vec<_>>>()?;
+        let (h, m, s) = match parts[..] {
+            [h, m] => (h, m, 0),
+            [h, m, s] => (h, m, s),
+            _ => return None,
+        };
+        secs = h * 3600 + m * 60 + s;
+        rest = &r[time_len..];
+        if let Some(frac) = rest.strip_prefix('.') {
+            rest = frac.trim_start_matches(|c: char| c.is_ascii_digit());
+        }
+    }
+    let zone = rest.trim();
+    let offset = match zone {
+        "" | "Z" | "z" | "UTC" | "GMT" => 0,
+        z => {
+            let sign = match z.as_bytes()[0] {
+                b'+' => 1,
+                b'-' => -1,
+                _ => return None,
+            };
+            let digits: String = z[1..].chars().filter(char::is_ascii_digit).collect();
+            let (h, m) = match digits.len() {
+                2 => (num(&digits)?, 0),
+                4 => (num(&digits[..2])?, num(&digits[2..])?),
+                _ => return None,
+            };
+            sign * (h * 3600 + m * 60)
+        }
+    };
+    u64::try_from(days * 86_400 + secs - offset).ok()
+}
+
+/// A date as tools print it (see [`parse_loose`]) → RFC 3339 UTC.
+pub fn normalize(ts: &str) -> Option<String> {
+    parse_loose(ts).map(format_rfc3339)
+}
+
 /// Epoch seconds of the start of the local day containing `secs`.
 pub fn local_day_start(secs: u64, offset: i64) -> u64 {
     let local = secs as i64 + offset;
@@ -127,6 +191,22 @@ pub fn local_week_start(secs: u64, offset: i64) -> u64 {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn loose_dates() {
+        let z = |s: &str| normalize(s).unwrap_or_else(|| panic!("{s}"));
+        assert_eq!(z("2026-09-21"), "2026-09-21T00:00:00Z");
+        assert_eq!(z("2026-09-21T09:30:00Z"), "2026-09-21T09:30:00Z");
+        assert_eq!(z("2026-09-21T09:30:00.000+0200"), "2026-09-21T07:30:00Z");
+        assert_eq!(z("2026-09-21T09:30:00-05:30"), "2026-09-21T15:00:00Z");
+        assert_eq!(z("2026-09-21 09:30:00.000000000"), "2026-09-21T09:30:00Z");
+        assert_eq!(z("2026-09-21 09:30 UTC"), "2026-09-21T09:30:00Z");
+        assert_eq!(z("1790000000"), "2026-09-21T14:13:20Z");
+        assert_eq!(z("1790000000123"), "2026-09-21T14:13:20Z");
+        assert_eq!(normalize("yesterday"), None);
+        assert_eq!(normalize("2026-09-21T09"), None);
+        assert_eq!(normalize("2026-09-21T09:30 CEST"), None);
+    }
 
     #[test]
     fn formats() {
