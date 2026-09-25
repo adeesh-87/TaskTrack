@@ -914,6 +914,7 @@ impl App {
         if self.watched.elapsed() >= WATCH {
             self.watched = now;
             self.reload_outside_changes();
+            self.reload_config_if_changed();
             if self.store.is_some() {
                 self.check_day();
             }

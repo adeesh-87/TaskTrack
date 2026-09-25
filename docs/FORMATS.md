@@ -126,7 +126,7 @@ Prompt = user template (placeholders `{{task}} {{task_dir}} {{context_file}}
   `CONTEXT_READY: yes` or `CONTEXT_READY: no - <what is missing>`.
 - checkpoints: only lines `- [ ] <step> (<estimate>)`, 3–12 of them.
 
-## CLI (for scripts and agents; default task `$PAHIRI_TASK`)
+## CLI (for scripts and agents; default task `$PAHIRI_TASK`, config `$PAHIRI_CONFIG`)
 
 ```
 pahiri task ready [--task ID] [--off]   flip context_ready
@@ -138,5 +138,7 @@ pahiri trash empty [--older-than 30d]   delete old trashed tasks
 pahiri report [--from D] [--to D] [--json]   tasks active in the range
 pahiri plan show [--date D] [--json]    day plan with each item's state
 pahiri plan add [--task ID] [--date D] <text [20m]>   add to the plan
+pahiri config add-workspace NAME PATH [--main B] | add-build NAME PATH
+pahiri config remove-workspace NAME | remove-build NAME | prune | list
 pahiri install-skills <DIR> [--force]   write bundled skills to DIR/<name>/SKILL.md
 ```

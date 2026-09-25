@@ -348,6 +348,11 @@ impl App {
                      Hooks change pahiri by editing files or calling `$PAHIRI_BIN task …`\n\
                      (ready, log, move, outcome, next); pahiri reloads CONTEXT.md, the board and\n\
                      the file tree when they change. A failing hook only shows a status line.\n\n\
+                     Esc ! runs a hook now (PAHIRI_MANUAL=1), e.g. startup after you cloned a repo.\n\
+                     config.toml is reloaded when it changes on disk, so a hook can change settings\n\
+                     with `$PAHIRI_BIN config add-workspace|add-build|prune …` — see\n\
+                     examples/hooks/discover-workspaces.sh, which fills in workspaces and yocto builds\n\
+                     from what is on disk.\n\n\
                      EVENTS\n",
                 );
                 for e in HookEvent::ALL {
@@ -436,6 +441,11 @@ impl App {
                  pahiri report [--from D] [--to D] [--json]   tasks active in a range (reviews)\n  \
                  pahiri plan show [--date D] [--json]         the day plan with each item's state\n  \
                  pahiri plan add [--task ID] <text 20m>       add to today's plan\n  \
+                 pahiri config add-workspace NAME PATH [--main B]   add / update a workspace\n  \
+                 pahiri config add-build NAME PATH            add / update a vendor build\n  \
+                 pahiri config remove-workspace|remove-build NAME\n  \
+                 pahiri config prune                          drop entries whose folder is gone\n  \
+                 pahiri config list                           workspaces and builds, tab separated\n  \
                  pahiri trash empty [--older-than 30d]        delete old trashed tasks\n  \
                  pahiri install-skills <dir> [--force]        write the bundled agent skills\n  \
                  pahiri --show-config             config, log and state paths\n\n\

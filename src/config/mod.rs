@@ -418,6 +418,29 @@ impl Config {
         })
     }
 
+    /// Problems that do not stop pahiri: workspace and build folders that are
+    /// missing (a checkout removed, a drive not mounted). `pahiri config prune`
+    /// drops them.
+    pub fn warnings(&self) -> Vec<String> {
+        let workspaces = self
+            .workspaces
+            .iter()
+            .filter(|w| !w.path.is_dir())
+            .map(|w| {
+                format!(
+                    "workspace {} folder is missing: {}",
+                    w.name,
+                    w.path.display()
+                )
+            });
+        let builds = self
+            .builds
+            .iter()
+            .filter(|b| !b.path.is_dir())
+            .map(|b| format!("build {} folder is missing: {}", b.name, b.path.display()));
+        workspaces.chain(builds).collect()
+    }
+
     /// Validate the configuration, returning every problem found (empty means valid).
     pub fn validate(&self) -> Vec<String> {
         let mut errors = Vec::new();
@@ -462,13 +485,6 @@ impl Config {
             } else if !names.insert(w.name.clone()) {
                 errors.push(format!("duplicate workspace name {:?}", w.name));
             }
-            if !w.path.is_dir() {
-                errors.push(format!(
-                    "workspace {} folder does not exist: {}",
-                    w.name,
-                    w.path.display()
-                ));
-            }
         }
         let mut names = std::collections::HashSet::new();
         for b in &self.builds {
@@ -476,13 +492,6 @@ impl Config {
                 errors.push(format!("build name {:?} must be a single word", b.name));
             } else if !names.insert(b.name.clone()) {
                 errors.push(format!("duplicate build name {:?}", b.name));
-            }
-            if !b.path.is_dir() {
-                errors.push(format!(
-                    "build {} folder does not exist: {}",
-                    b.name,
-                    b.path.display()
-                ));
             }
         }
         let mut names = std::collections::HashSet::new();
@@ -641,8 +650,13 @@ mod tests {
         };
         let errors = bad.validate();
         assert!(errors.iter().any(|e| e.contains("single word")));
-        assert!(errors.iter().any(|e| e.contains("does not exist")));
         assert!(errors.iter().any(|e| e.contains("no command")));
+        // A missing folder is only a warning: pahiri still starts.
+        assert!(!errors.iter().any(|e| e.contains("/nonexistent/x")));
+        assert_eq!(
+            bad.warnings(),
+            ["workspace two words folder is missing: /nonexistent/x"]
+        );
     }
 
     #[test]

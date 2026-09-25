@@ -82,6 +82,8 @@ pub enum Pending {
     PlanDiscard,
     /// Stop the timer and start it on plan item N.
     PlanStart(usize),
+    /// Run the hook configured for this event now.
+    RunHook(String),
     /// Add the entered text to the plan (for this task, or a free item).
     PlanAdd(Option<String>),
     /// Nothing (used by cancel options).

@@ -161,10 +161,9 @@ fn draw_status_bar(frame: &mut Frame<'_>, app: &mut App, area: Rect, theme: &The
             },
         },
     };
-    let mut spans = vec![Span::styled(
-        format!(" {hint} "),
-        Style::new().fg(theme.muted),
-    )];
+    // A message matters more than the key hints: it goes first, so a narrow
+    // bar cuts the hints instead.
+    let mut spans = Vec::new();
     if let Some(msg) = app.status() {
         spans.push(Span::styled(
             format!(" {msg} "),
@@ -177,6 +176,10 @@ fn draw_status_bar(frame: &mut Frame<'_>, app: &mut App, area: Rect, theme: &The
             Style::new().fg(theme.warning),
         ));
     }
+    spans.push(Span::styled(
+        format!(" {hint} "),
+        Style::new().fg(theme.muted),
+    ));
     let (right, right_style) = timer_chip(app, theme);
     let used: usize = spans.iter().map(|s| s.content.chars().count()).sum();
     let right_width = right.chars().count().min(area.width as usize);

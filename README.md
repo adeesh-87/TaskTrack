@@ -82,6 +82,7 @@ filter, `Enter` to run, `Esc` to close.
 | `D` | delete the task (moved to `.trash`) |
 | `T` | back to Home |
 | `y` | plan your day (the Plan view; `p` on Home) |
+| `!` | run a hook now (e.g. re-run `startup`) |
 | `p` | **prepare**: commit, pull main, switch attached repos to the task branch |
 | `a` | **attach** code workspaces / vendor builds to the task |
 | `s` / `x` | new shell / close selected shell |
@@ -282,7 +283,8 @@ timer_start  = "~/src/pahiri/examples/hooks/start-moves-task.sh"
 Events: `startup`, `task_create`, `task_enter`, `task_leave`,
 `task_move`, `task_delete`, `attach`, `prepare_done`, `timer_start`,
 `timer_pause`, `timer_resume`, `timer_stop`, `timer_expire`,
-`checkpoint_done`, `context_generated`, `checkpoints_generated`, `gerrit`.
+`checkpoint_done`, `context_generated`, `checkpoints_generated`, `gerrit`,
+`day_start`, `plan_save`.
 Every hook gets `PAHIRI_TASK`, `PAHIRI_TASK_DIR`, `PAHIRI_CONTEXT_FILE`,
 `PAHIRI_COLUMN`, `PAHIRI_CODE_DIR(S)`, `PAHIRI_BIN` and more; each event
 adds its own (e.g. `PAHIRI_FROM_COLUMN` / `PAHIRI_FINISHED` for
@@ -291,6 +293,33 @@ and `task_create` are waited for; the rest run in the background. Hooks
 talk back through files and `$PAHIRI_BIN task …`; pahiri picks up changes
 to the board, the task folders, `CONTEXT.md` and the file tree within a
 second. Ready-made ones are in `examples/hooks/`.
+
+**Run a hook now:** `Esc !` lists your hooks and runs the one you pick for
+the current task (with `PAHIRI_MANUAL=1`) — e.g. re-run `startup` after
+you cloned a repo.
+
+**Config changes on the fly.** pahiri reloads `config.toml` within a second
+when it changes on disk — from a hook, `pahiri config …`, or your editor.
+A file with errors is ignored (the status line says why) and the previous
+settings stay; unsaved edits on the Settings view win until you leave it.
+A workspace or build whose folder is missing is only a warning, so pahiri
+still starts; `pahiri config prune` drops them.
+
+**Example: workspaces and builds from what is on disk.**
+`examples/hooks/discover-workspaces.sh` finds git checkouts (folders with a
+`.git`, skipping ones nested in another checkout) and bitbake/yocto build
+folders (with `conf/local.conf`), registers them with `pahiri config
+add-workspace` / `add-build`, and prunes the ones that are gone:
+
+```toml
+[hooks]
+startup = "CODE_ROOTS=~/src:~/work BUILD_ROOTS=~/yocto ~/src/pahiri/examples/hooks/discover-workspaces.sh"
+```
+
+Names come from the folder (`parent-name` when two share one); a new
+workspace gets the main branch git reports. Existing entries keep their
+name and branch, and a folder you registered under another name is not
+added twice. Re-run it with `Esc !` → `startup`.
 
 ## AI agents
 
@@ -359,6 +388,11 @@ pahiri task outcome "shipped the fix; root cause was a stale token"
 pahiri report --from 2026-01-01 --to 2026-06-30 [--json]
 pahiri plan show [--date D] [--json]  # today's plan with each item's state
 pahiri plan add [--task ID] Reply to review 20m
+pahiri config add-workspace fw ~/src/fw [--main develop]   # add or update
+pahiri config add-build imx ~/yocto/build-imx
+pahiri config remove-workspace fw | remove-build imx
+pahiri config prune                  # drop workspaces / builds whose folder is gone
+pahiri config list                   # kind, name, path, main branch (tab separated)
 pahiri trash empty --older-than 30d
 pahiri install-skills <dir> [--force]
 ```

@@ -7,6 +7,8 @@ pub enum Action {
     TaskList,
     /// Open the Plan view.
     PlanDay,
+    /// Run a configured hook now.
+    RunHook,
     /// Open settings.
     Config,
     /// Quit pahiri.
@@ -81,9 +83,10 @@ pub enum Action {
 
 impl Action {
     /// Every action (for key overrides and help).
-    pub const ALL: [Action; 37] = [
+    pub const ALL: [Action; 38] = [
         Self::TaskList,
         Self::PlanDay,
+        Self::RunHook,
         Self::Config,
         Self::Quit,
         Self::NewTask,
@@ -126,6 +129,7 @@ impl Action {
         match self {
             Self::TaskList => "task_list",
             Self::PlanDay => "plan_day",
+            Self::RunHook => "run_hook",
             Self::Config => "config",
             Self::Quit => "quit",
             Self::NewTask => "new_task",
@@ -194,6 +198,7 @@ pub fn list_commands() -> Vec<Command> {
             Action::NewTask,
         ),
         cmd('y', "plan your day (p)", Action::PlanDay),
+        cmd('!', "run a hook now (e.g. re-run startup)", Action::RunHook),
         cmd(
             'm',
             "timer menu (start / pause / next / stop)",
@@ -218,6 +223,7 @@ pub fn task_commands() -> Vec<Command> {
     vec![
         cmd('T', "back to Home", Action::TaskList),
         cmd('y', "plan your day", Action::PlanDay),
+        cmd('!', "run a hook now (e.g. re-run startup)", Action::RunHook),
         cmd(
             'p',
             "prepare: commit, pull main, switch attached repos to task branch",

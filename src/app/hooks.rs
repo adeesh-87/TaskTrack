@@ -10,7 +10,7 @@ use crate::hooks::{self, HookEvent};
 use crate::tasks::checkpoints;
 use crate::tasks::record::TaskRecord;
 
-use super::{App, AppEvent, JobEvent, Popup};
+use super::{App, AppEvent, Choice, JobEvent, Pending, Popup};
 
 /// Keep this many runs for the help page.
 const KEEP_RUNS: usize = 20;
@@ -167,6 +167,48 @@ impl App {
     /// Run the hook for `event` (if configured). Blocking events show a log
     /// while they run and continue with `then` afterwards; without a hook
     /// `then` runs right away.
+    /// `Esc !`: pick a configured hook to run now.
+    pub(super) fn open_run_hook_menu(&mut self) {
+        let choices: Vec<Choice> = self
+            .config
+            .hooks
+            .iter()
+            .filter(|(event, command)| {
+                HookEvent::from_name(event).is_some() && !command.trim().is_empty()
+            })
+            .map(|(event, command)| Choice {
+                label: format!("{event} · {}", cut(command.trim(), 60)),
+                pending: Pending::RunHook(event.clone()),
+            })
+            .collect();
+        if choices.is_empty() {
+            self.set_status("no hooks configured · settings (Esc c) → Hooks");
+            return;
+        }
+        let task = self.current_task_id().unwrap_or_default();
+        let title = if task.is_empty() {
+            "Run a hook now".to_owned()
+        } else {
+            format!("Run a hook now · {task}")
+        };
+        self.popup = Some(Popup::choose(title, choices));
+    }
+
+    /// Run the hook of `event` for the current task, as if the event happened.
+    pub(super) fn run_hook_now(&mut self, event: &str) {
+        let Some(event) = HookEvent::from_name(event) else {
+            return;
+        };
+        let task = self.current_task_id();
+        self.set_status(format!("running the {} hook …", event.name()));
+        self.fire_hook(
+            event,
+            task.as_deref(),
+            vec![("PAHIRI_MANUAL".into(), "1".into())],
+            AfterHook::Nothing,
+        );
+    }
+
     pub(super) fn fire_hook(
         &mut self,
         event: HookEvent,
@@ -307,4 +349,14 @@ impl App {
             ("PAHIRI_SPENT_MIN".into(), c.spent_min.to_string()),
         ]
     }
+}
+
+/// `text` cut to `width` chars with `…`.
+fn cut(text: &str, width: usize) -> String {
+    if text.chars().count() <= width {
+        return text.to_owned();
+    }
+    let mut out: String = text.chars().take(width.saturating_sub(1)).collect();
+    out.push('…');
+    out
 }

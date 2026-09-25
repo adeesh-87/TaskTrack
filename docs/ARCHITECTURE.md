@@ -61,6 +61,7 @@ loop: terminal.draw(ui::draw(&mut app)) → wait for next event → app.handle
 
 About once a second (`App::reload_outside_changes`) pahiri re-reads the
 board, the task folders, the open task's `CONTEXT.md` and its file tree when
-they changed on disk, so hooks, agents and `pahiri task …` can edit them
+they changed on disk (and `config.toml`: `App::reload_config_if_changed`,
+applied like a save from Settings through `apply_config`), so hooks, agents and `pahiri task …` can edit them
 while the TUI runs. Saving `CONTEXT.md` from the editor merges changes made
 meanwhile (`tasks/merge.rs`).

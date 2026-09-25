@@ -1847,3 +1847,155 @@ fn mouse_and_timer_menu_work_on_the_plan() {
     );
     h.app.shutdown();
 }
+
+/// Set `path`'s modification time `secs` seconds ahead so a change is seen
+/// even on coarse file-system clocks.
+fn bump_mtime(path: &Path, secs: u64) {
+    let f = fs::File::options().write(true).open(path).unwrap();
+    f.set_modified(std::time::SystemTime::now() + Duration::from_secs(secs))
+        .unwrap();
+}
+
+#[test]
+fn config_changes_on_disk_are_reloaded() {
+    let mut h = Harness::new(true);
+    let path = h.root.join("config.toml");
+    h.app.config().save(&path).unwrap();
+    bump_mtime(&path, 1);
+    h.watch();
+    assert!(h.app.status().is_none(), "same settings: nothing to say");
+
+    // A script adds a workspace and a build: pahiri picks them up.
+    let fw = h.root.join("fw");
+    let yocto = h.root.join("yocto");
+    fs::create_dir_all(&fw).unwrap();
+    fs::create_dir_all(&yocto).unwrap();
+    crate::cli::config_add_workspace(&path, "fw", &fw, Some("main".into())).unwrap();
+    crate::cli::config_add_build(&path, "yocto", &yocto).unwrap();
+    bump_mtime(&path, 2);
+    h.watch();
+    assert_eq!(h.app.config().workspaces.len(), 1);
+    assert_eq!(h.app.config().builds.len(), 1);
+    assert_eq!(
+        h.app.status(),
+        Some("config reloaded from disk · workspaces 1 (+1) · builds 1 (+1)")
+    );
+
+    // Broken or invalid files keep the previous settings.
+    let good = fs::read_to_string(&path).unwrap();
+    fs::write(&path, "garbage = [").unwrap();
+    bump_mtime(&path, 3);
+    h.watch();
+    assert!(h.app.status().unwrap().contains("cannot be read"));
+    assert_eq!(h.app.config().workspaces.len(), 1);
+    fs::write(&path, good.replace("name = \"fw\"", "name = \"f w\"")).unwrap();
+    bump_mtime(&path, 4);
+    h.watch();
+    let status = h.app.status().unwrap().to_owned();
+    assert!(status.contains("keeping the previous settings"), "{status}");
+    assert_eq!(h.app.config().workspaces[0].name, "fw");
+    // A missing folder is loaded, with a warning.
+    let missing = good.replace(&fw.display().to_string(), "/no/such/dir");
+    fs::write(&path, missing).unwrap();
+    bump_mtime(&path, 5);
+    h.press(key(KeyCode::Down));
+    h.watch();
+    let status = h.app.status().unwrap().to_owned();
+    assert!(
+        status.contains("folder is missing: /no/such/dir"),
+        "{status}"
+    );
+    assert_eq!(
+        h.app.config().workspaces[0].path,
+        std::path::PathBuf::from("/no/such/dir")
+    );
+
+    // Unsaved edits on the Settings view win until you leave it.
+    fs::write(&path, &good).unwrap();
+    bump_mtime(&path, 6);
+    h.watch();
+    h.press(key(KeyCode::Char(',')));
+    h.press(key(KeyCode::Enter));
+    h.type_str("x");
+    h.press(key(KeyCode::Enter));
+    assert!(matches!(h.app.mode(), Mode::Settings(f) if f.dirty()));
+    crate::cli::config_remove(&path, true, "yocto").unwrap();
+    bump_mtime(&path, 7);
+    h.watch();
+    assert!(h.app.status().unwrap().contains("changed on disk"));
+    assert_eq!(h.app.config().builds.len(), 1);
+    h.press(key(KeyCode::Esc));
+    h.press(key(KeyCode::Char('y')));
+    assert!(matches!(h.app.mode(), Mode::Home));
+    h.watch();
+    assert!(
+        h.app.config().builds.is_empty(),
+        "reloaded after leaving Settings"
+    );
+}
+
+#[test]
+fn tasks_dir_override_survives_a_reload() {
+    let mut h = Harness::new(true);
+    let path = h.root.join("config.toml");
+    let mut on_disk = h.app.config().clone();
+    let elsewhere = h.root.join("elsewhere");
+    fs::create_dir_all(&elsewhere).unwrap();
+    on_disk.tasks_dir.clone_from(&elsewhere);
+    on_disk.default_main_branch = "develop".into();
+    on_disk.save(&path).unwrap();
+    let tasks = h.tasks.clone();
+    h.app.set_tasks_dir_override(tasks.clone());
+    bump_mtime(&path, 1);
+    h.watch();
+    assert_eq!(h.app.config().default_main_branch, "develop");
+    assert_eq!(h.app.config().tasks_dir, tasks);
+}
+
+#[test]
+fn run_a_hook_now_from_the_palette() {
+    let mut h = Harness::build(true, |cfg| {
+        cfg.hooks.insert(
+            "startup".into(),
+            "echo \"manual=$PAHIRI_MANUAL task=$PAHIRI_TASK\" > \"$PAHIRI_TASKS_DIR/ran.txt\""
+                .into(),
+        );
+    });
+    let ran = h.tasks.join("ran.txt");
+    assert!(h.pump_until(|_| fs::read_to_string(&ran).is_ok_and(|s| s.contains("manual= "))));
+    fs::remove_file(&ran).unwrap();
+    h.press(key(KeyCode::Esc));
+    h.press(key(KeyCode::Char('!')));
+    assert!(popup_title(&h.app).starts_with("Run a hook now"));
+    h.choose("startup");
+    assert!(h.pump_until(|_| {
+        fs::read_to_string(&ran).is_ok_and(|s| s.trim() == "manual=1 task=alpha")
+    }));
+    // With no hooks configured it says so instead of opening an empty menu.
+    let mut h = Harness::new(true);
+    h.press(key(KeyCode::Esc));
+    h.press(key(KeyCode::Char('!')));
+    assert!(h.app.popup().is_none());
+    assert!(h.app.status().unwrap().contains("no hooks configured"));
+}
+
+#[test]
+fn a_missing_workspace_folder_does_not_stop_pahiri() {
+    let h = Harness::build(true, |cfg| {
+        cfg.workspaces.push(crate::config::Workspace {
+            name: "gone".into(),
+            path: cfg.tasks_dir.join("no-such-checkout"),
+            main_branch: None,
+        });
+    });
+    assert!(
+        matches!(h.app.mode(), Mode::Home),
+        "starts on Home, not Settings"
+    );
+    let status = h.app.status().unwrap_or_default();
+    assert!(
+        status.contains("workspace gone folder is missing"),
+        "{status}"
+    );
+    assert!(status.contains("pahiri config prune"), "{status}");
+}

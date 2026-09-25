@@ -347,6 +347,182 @@ pub fn plan_add(
     Ok(format!("added to {day}: {}", item.render()))
 }
 
+/// Load the config at `path`, apply `change`, and save it only when something
+/// changed. Refuses changes that make the config invalid.
+fn edit_config(path: &Path, change: impl FnOnce(&mut Config) -> Result<String>) -> Result<String> {
+    let before = Config::load(path)?.with_context(|| {
+        format!(
+            "no config at {} yet: start pahiri once to create it",
+            path.display()
+        )
+    })?;
+    let mut cfg = before.clone();
+    let message = change(&mut cfg)?;
+    if cfg == before {
+        return Ok(message);
+    }
+    let old_errors = before.validate();
+    let new: Vec<String> = cfg
+        .validate()
+        .into_iter()
+        .filter(|e| !old_errors.contains(e))
+        .collect();
+    if !new.is_empty() {
+        bail!("not saved: {}", new.join("; "));
+    }
+    cfg.save(path)?;
+    Ok(message)
+}
+
+/// A folder argument as an absolute path that exists.
+fn existing_dir(dir: &Path) -> Result<PathBuf> {
+    let dir = Config::expand_tilde(&dir.display().to_string());
+    let dir = std::path::absolute(&dir).unwrap_or(dir);
+    if !dir.is_dir() {
+        bail!("no such folder: {}", dir.display());
+    }
+    Ok(dir)
+}
+
+/// `pahiri config add-workspace NAME PATH [--main BRANCH]`: add a code
+/// workspace, or update the path (and branch) of the one with that name.
+/// Without `--main`, a new workspace gets the branch git reports.
+pub fn config_add_workspace(
+    path: &Path,
+    name: &str,
+    dir: &Path,
+    main: Option<String>,
+) -> Result<String> {
+    let dir = existing_dir(dir)?;
+    edit_config(path, |cfg| {
+        if let Some(other) = cfg
+            .workspaces
+            .iter()
+            .find(|w| w.path == dir && w.name != name)
+        {
+            return Ok(format!(
+                "workspace {name}: unchanged ({} is already workspace {})",
+                dir.display(),
+                other.name
+            ));
+        }
+        if let Some(w) = cfg.workspaces.iter_mut().find(|w| w.name == name) {
+            let mut what = Vec::new();
+            if w.path != dir {
+                w.path.clone_from(&dir);
+                what.push(format!("path {}", dir.display()));
+            }
+            if main.is_some() && w.main_branch != main {
+                w.main_branch.clone_from(&main);
+                what.push(format!("main branch {}", main.as_deref().unwrap_or("")));
+            }
+            return Ok(if what.is_empty() {
+                format!("workspace {name}: unchanged")
+            } else {
+                format!("workspace {name}: updated {}", what.join(", "))
+            });
+        }
+        let main = main.or_else(|| {
+            crate::git::detect_main_branch(&dir).filter(|b| *b != cfg.default_main_branch)
+        });
+        let branch = main
+            .as_deref()
+            .map_or_else(String::new, |b| format!(" @{b}"));
+        cfg.workspaces.push(crate::config::Workspace {
+            name: name.to_owned(),
+            path: dir.clone(),
+            main_branch: main,
+        });
+        Ok(format!("workspace {name}: added {}{branch}", dir.display()))
+    })
+}
+
+/// `pahiri config add-build NAME PATH`: add a vendor build, or update its path.
+pub fn config_add_build(path: &Path, name: &str, dir: &Path) -> Result<String> {
+    let dir = existing_dir(dir)?;
+    edit_config(path, |cfg| {
+        if let Some(other) = cfg.builds.iter().find(|b| b.path == dir && b.name != name) {
+            return Ok(format!(
+                "build {name}: unchanged ({} is already build {})",
+                dir.display(),
+                other.name
+            ));
+        }
+        if let Some(b) = cfg.builds.iter_mut().find(|b| b.name == name) {
+            if b.path == dir {
+                return Ok(format!("build {name}: unchanged"));
+            }
+            b.path.clone_from(&dir);
+            return Ok(format!("build {name}: updated path {}", dir.display()));
+        }
+        cfg.builds.push(crate::config::VendorBuild {
+            name: name.to_owned(),
+            path: dir.clone(),
+        });
+        Ok(format!("build {name}: added {}", dir.display()))
+    })
+}
+
+/// `pahiri config remove-workspace|remove-build NAME`.
+pub fn config_remove(path: &Path, build: bool, name: &str) -> Result<String> {
+    let kind = if build { "build" } else { "workspace" };
+    edit_config(path, |cfg| {
+        let before = cfg.workspaces.len() + cfg.builds.len();
+        if build {
+            cfg.builds.retain(|b| b.name != name);
+        } else {
+            cfg.workspaces.retain(|w| w.name != name);
+        }
+        if cfg.workspaces.len() + cfg.builds.len() == before {
+            bail!("no {kind} named {name:?}");
+        }
+        Ok(format!("{kind} {name}: removed"))
+    })
+}
+
+/// `pahiri config prune`: drop workspaces and builds whose folder is gone.
+pub fn config_prune(path: &Path) -> Result<String> {
+    edit_config(path, |cfg| {
+        let mut gone: Vec<String> = cfg
+            .workspaces
+            .iter()
+            .filter(|w| !w.path.is_dir())
+            .map(|w| format!("workspace {}", w.name))
+            .collect();
+        gone.extend(
+            cfg.builds
+                .iter()
+                .filter(|b| !b.path.is_dir())
+                .map(|b| format!("build {}", b.name)),
+        );
+        cfg.workspaces.retain(|w| w.path.is_dir());
+        cfg.builds.retain(|b| b.path.is_dir());
+        Ok(if gone.is_empty() {
+            "nothing to prune".to_owned()
+        } else {
+            format!("removed {}", gone.join(", "))
+        })
+    })
+}
+
+/// `pahiri config list`: workspaces and builds as `kind<TAB>name<TAB>path`.
+pub fn config_list(cfg: &Config) -> String {
+    let mut out = String::new();
+    for w in &cfg.workspaces {
+        let _ = writeln!(
+            out,
+            "workspace\t{}\t{}\t{}",
+            w.name,
+            w.path.display(),
+            w.main_branch.as_deref().unwrap_or(&cfg.default_main_branch)
+        );
+    }
+    for b in &cfg.builds {
+        let _ = writeln!(out, "build\t{}\t{}", b.name, b.path.display());
+    }
+    out.trim_end().to_owned()
+}
+
 /// `pahiri install-skills <dir>`: write the bundled skills as `<dir>/<name>/SKILL.md`.
 pub fn install_skills(dir: &Path, force: bool) -> Result<String> {
     let mut out = String::new();
@@ -376,6 +552,79 @@ mod tests {
             tasks_dir: dir.to_path_buf(),
             ..Config::default()
         }
+    }
+
+    #[test]
+    fn config_commands_edit_workspaces_and_builds() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path();
+        let tasks = root.join("tasks");
+        let (fw, fw2, yocto) = (root.join("fw"), root.join("fw-new"), root.join("yocto"));
+        for d in [&tasks, &fw, &fw2, &yocto] {
+            fs::create_dir_all(d).unwrap();
+        }
+        let path = root.join("config.toml");
+        assert!(config_prune(&path).is_err(), "no config yet");
+        cfg(&tasks).save(&path).unwrap();
+        let load = || Config::load(&path).unwrap().unwrap();
+
+        assert_eq!(
+            config_add_workspace(&path, "fw", &fw, None).unwrap(),
+            format!("workspace fw: added {}", fw.display())
+        );
+        assert_eq!(
+            config_add_workspace(&path, "fw", &fw, None).unwrap(),
+            "workspace fw: unchanged"
+        );
+        let mtime = fs::metadata(&path).unwrap().modified().unwrap();
+        config_add_workspace(&path, "fw", &fw, None).unwrap();
+        assert_eq!(
+            fs::metadata(&path).unwrap().modified().unwrap(),
+            mtime,
+            "no write when nothing changed"
+        );
+        assert!(
+            config_add_workspace(&path, "fw", &fw2, Some("develop".into()))
+                .unwrap()
+                .contains("updated path")
+        );
+        let w = &load().workspaces[0];
+        assert_eq!(
+            (w.path.as_path(), w.main_branch.as_deref()),
+            (fw2.as_path(), Some("develop"))
+        );
+        assert!(config_add_workspace(&path, "firmware", &fw2, None)
+            .unwrap()
+            .contains("is already workspace fw"));
+        assert!(config_add_workspace(&path, "bad name", &fw, None).is_err());
+        assert!(config_add_workspace(&path, "x", &root.join("missing"), None).is_err());
+
+        config_add_build(&path, "yocto", &yocto).unwrap();
+        assert_eq!(
+            config_add_build(&path, "yocto", &yocto).unwrap(),
+            "build yocto: unchanged"
+        );
+        assert!(config_add_build(&path, "other", &yocto)
+            .unwrap()
+            .contains("is already build yocto"));
+        assert_eq!(
+            config_list(&load()),
+            format!(
+                "workspace\tfw\t{}\tdevelop\nbuild\tyocto\t{}",
+                fw2.display(),
+                yocto.display()
+            )
+        );
+
+        fs::remove_dir_all(&yocto).unwrap();
+        assert_eq!(config_prune(&path).unwrap(), "removed build yocto");
+        assert_eq!(config_prune(&path).unwrap(), "nothing to prune");
+        assert_eq!(
+            config_remove(&path, false, "fw").unwrap(),
+            "workspace fw: removed"
+        );
+        assert!(config_remove(&path, true, "nope").is_err());
+        assert!(load().workspaces.is_empty() && load().builds.is_empty());
     }
 
     #[test]

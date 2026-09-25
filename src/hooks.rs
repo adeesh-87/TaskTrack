@@ -77,6 +77,7 @@ pub const COMMON_ENV: &[(&str, &str)] = &[
     ("PAHIRI_BUILD_DIRS", "all of them as name=path;…"),
     ("PAHIRI_NEXT_CHECKPOINT", "next open checkpoint title"),
     ("PAHIRI_CONTEXT_READY", "yes / no"),
+    ("PAHIRI_MANUAL", "1 when you ran the hook by hand (Esc !)"),
 ];
 
 impl HookEvent {
