@@ -188,6 +188,9 @@ fn draw_status_bar(frame: &mut Frame<'_>, app: &mut App, area: Rect, theme: &The
             Mode::Plan(_) => {
                 "Space pick · s suggest · a add · t add to task · Tab switch · J/K order · x remove · A all columns · Enter save · Esc cancel".to_owned()
             }
+            Mode::Task if app.pane_nav() => {
+                "panes: Tab / Shift+Tab next / previous · Enter (or any key) stay here · Esc menu".to_owned()
+            }
             Mode::Task => match app.active_context().map(|c| c.focus) {
                 Some(Focus::Terminal) if app.leader_pending() => {
                     format!("{leader} + q leave · z zoom · n new · a agent · m timer · ? help")
@@ -195,7 +198,7 @@ fn draw_status_bar(frame: &mut Frame<'_>, app: &mut App, area: Rect, theme: &The
                 Some(Focus::Terminal) => {
                     format!("keys go to the shell · {leader} q leave · {leader} ? help · Ctrl+Tab next pane")
                 }
-                Some(Focus::Editor) => "Esc commands · Ctrl+S save · Ctrl+C/X/V copy/cut/paste · Ctrl+Z undo · Ctrl+F find · F1 help".to_owned(),
+                Some(Focus::Editor) => "Esc Tab panes · Esc Esc commands · Ctrl+S save · Ctrl+C/X/V copy/cut/paste · Ctrl+Z undo · Ctrl+F find · F1 help".to_owned(),
                 Some(Focus::Shells) => "Esc commands · Enter focus · n new · x close · Ctrl+1..9 select".to_owned(),
                 _ => "Esc commands · F1 help · Enter open · a/A new · r rename · d delete · t shell".to_owned(),
             },

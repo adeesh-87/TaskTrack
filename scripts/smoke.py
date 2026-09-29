@@ -115,6 +115,15 @@ def send(keys, seconds=0.6):
     pump(seconds)
 
 
+def menu(letter, seconds=0.6):
+    """Run a palette command: Esc (from the editor Esc Esc: the first one
+    only leaves the text), then its letter."""
+    send("\x1b", 0.3)
+    if " commands " not in text():
+        send("\x1b", 0.3)
+    send(letter, seconds)
+
+
 def wait_for(needle, seconds=10):
     end = time.time() + seconds
     while time.time() < end:
@@ -136,7 +145,7 @@ dump("tickets", "Fix the flux capacitor")
 send("\r", 1.0)
 dump("task created", "PROJ-42")
 send("\r", 1.0)                                # open PROJ-42
-send("\x1b"); send("o", 0.8)                   # open CONTEXT.md
+menu("o", 0.8)                   # open CONTEXT.md
 dump("context of ticket task", "Link: https://jira.example.com/browse/PROJ-42")
 
 
@@ -181,11 +190,11 @@ send("\x1b[C", 0.3)
 # focuses the files pane; a second click opens it (already open → focus editor).
 child.send("\x1b[<0;3;3M\x1b[<0;3;3m"); pump(0.5)
 dump("after mouse click on files", "files")
-send("\x1b"); send("a", 0.8)                   # attach
+menu("a", 0.8)                   # attach
 dump("attach", "[ ] code")
 send(" "); send("\r", 0.8)
 dump("attached", "code: fw")
-send("\x1b"); send("p", 0.8)                   # prepare
+menu("p", 0.8)                   # prepare
 wait_for("done:")
 dump("prepared", "created branch 'PROJ-42'")
 send("\r", 0.8)
@@ -199,13 +208,13 @@ send("\r", 0.8)
 send("\x06", 0.3); send("fw", 0.5)             # Ctrl+F
 dump("find bar", "1/1")
 send("\x1b", 0.3)                               # Esc closes the bar
-send("\x1b"); send("G", 0.8)                   # search in files
+menu("G", 0.8)                   # search in files
 send("flux\r", 1.5)
 dump("search in files", "CONTEXT.md (")
 send("\r", 0.8)                                # open the first match
 dump("search result opened", "CONTEXT.md")
 send("\x02", 0.5)                              # Ctrl+B: back to the file tree
-send("\x1b"); send("s", 1.5)                   # new shell
+menu("s", 1.5)                   # new shell
 send("cd code && git branch --show-current && pwd\r", 1.5)
 wait_for("/firmware")
 dump("shell cd code", "PROJ-42")
@@ -223,7 +232,7 @@ send("\x02\x1b", 0.8)                          # leader Esc: palette from the sh
 dump("palette from shell", "commands")
 send("T", 0.8)
 dump("back to list", "PLANNED")
-send("\x1b"); send("c", 0.8)                   # config
+menu("c", 0.8)                   # config
 dump("settings", "Code workspaces")
 send("\x1b", 0.5)
 dump("home: today pane", "No plan for today yet")
@@ -231,15 +240,15 @@ dump("home: today pane", "No plan for today yet")
 # AI context → ready → checkpoints → timer → time's up (flash) → done.
 send("\r", 1.0)                                # open PROJ-42 again (terminal focused)
 send("\x02q", 0.5)                             # leader q: leave the shell
-send("\x1b"); send("i", 0.5)
+menu("i", 0.5)
 wait_for("context ready: yes")
 dump("ai context", "wrote")
 send("\r", 0.5)
-send("\x1b"); send("b", 0.5)
+menu("b", 0.5)
 wait_for("written to ## Checkpoints")
 dump("ai checkpoints", "Flux the capacitor")
 send("\r", 0.5)
-send("\x1b"); send("m", 0.5)                   # timer menu
+menu("m", 0.5)                   # timer menu
 dump("timer menu", "start: Tiny warm-up")
 send("1", 0.1)                                 # start it: no time left on it
 flashed = False
@@ -253,7 +262,7 @@ if not flashed:
     failures.append("screen did not flash")
 if "done → next" in text():
     failures.append("time's up must not open a popup")
-send("\x1b"); send("m", 0.5)                   # open the timer menu yourself
+menu("m", 0.5)                   # open the timer menu yourself
 dump("timer menu after alarm", "done → next: Flux the capacitor")
 send("1", 0.8)                                 # done → next checkpoint
 dump("timer running", "Flux the capacitor")
@@ -264,8 +273,8 @@ dump("help page", "pahiri help")
 send("\x1b[C", 0.5); send("\x1b[C", 0.5); send("\x1b[C", 0.5)   # → Hooks tab
 dump("help: hooks", "PAHIRI_PREV_TASK")
 send("q", 0.5)
-send("\x1b"); send("M", 0.5)                   # stop and book
-send("\x1b"); send("T", 0.8)
+menu("M", 0.5)                   # stop and book
+menu("T", 0.8)
 # Plan the day: p → A (all columns: PROJ-42 is still in Planned) → s suggest → Enter.
 send("p", 0.8)
 dump("plan view", "What can be planned")
@@ -282,7 +291,7 @@ if "⏱ PROJ-42" not in text():
 dump("timer from the plan", "▶")
 send("M", 0.5)                                 # M works from the Today pane too
 # The audit: Esc U → proposal (rules + the fake agent) → a → y.
-send("\x1b"); send("U", 0.3)
+menu("U", 0.3)
 wait_for("What it does")
 dump("audit view", "dts-cleanup")
 if "Flux fix" not in text():
@@ -291,7 +300,7 @@ send("a", 0.5)
 dump("audit confirm", "Apply the audit?")
 send("y", 1.0)
 dump("audit applied", "audit applied: 1 created, 1 updated")
-send("\x1b"); send("q", 0.5)                   # quit → confirm (shell running)
+menu("q", 0.5)                   # quit → confirm (shell running)
 dump("quit confirm", "Quit pahiri?")
 send("y", 1.0)
 child.expect(pexpect.EOF, timeout=5)
@@ -333,8 +342,7 @@ if shutil.which("clangd") or shutil.which("ctags"):
         if wait_for("1:12", 5):
             break
     dump("F12 definition", "1:12")
-send("\x1b")
-send("q", 1.0)
+menu("q", 1.0)
 child.expect(pexpect.EOF, timeout=5)
 
 if failures:

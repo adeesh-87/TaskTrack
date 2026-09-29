@@ -290,7 +290,7 @@ impl App {
                      AUDIT (Esc U)\n  Space tick · Enter decide / rename · A all/none · a apply · Esc leave (F1 → Audit)\n\n\
                      PLAN\n  Space pick · s suggest · a add a free item · t add one for the task · Tab/←→ sides\n  \
                      J/K order · x remove · A all columns · Enter save · Esc cancel\n\n\
-                     PANES (task view)\n  Alt+] / Alt+[ (Ctrl+Tab / Ctrl+Shift+Tab outside editor and files)   next / previous pane\n  \
+                     PANES (task view)\n  In the editor: Esc, then Tab / Shift+Tab next / previous pane (Esc again: the palette)\n  Alt+] / Alt+[ (Ctrl+Tab / Ctrl+Shift+Tab outside editor and files)   next / previous pane\n  \
                      Ctrl+1..9 / Alt+1..9   select shell N\n\n\
                      FILES (the task folder, then its attached workspaces and builds)\n  \
                      Enter open/toggle · ←/→ or -/+ collapse/expand · a new file · A new folder · r rename\n  \
@@ -315,7 +315,7 @@ impl App {
                      Ctrl+C copy · Ctrl+X cut · Ctrl+V paste (nothing selected: copy/cut the line)\n  \
                      Ctrl+Backspace (Ctrl+H, Alt+Backspace) / Ctrl+Delete (Alt+D) delete a word\n  \
                      Mouse: drag selects · double-click word · triple-click line\n  \
-                     Typing replaces the selection. In the editor Ctrl+C copies: quit with Esc q.\n  \
+                     Typing replaces the selection. In the editor Ctrl+C copies: quit with Esc Esc q.\n  \
                      Copies reach the system clipboard via OSC 52 (tmux: set -g set-clipboard on),\n  \
                      or via the Copy command setting (wl-copy, xclip -selection clipboard, pbcopy).\n  \
                      Ctrl+V pastes the last copy, or the Paste command's output (wl-paste -n, pbpaste).\n  \
