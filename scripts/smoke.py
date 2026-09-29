@@ -188,6 +188,22 @@ send("\x1b"); send("p", 0.8)                   # prepare
 wait_for("done:")
 dump("prepared", "created branch 'PROJ-42'")
 send("\r", 0.8)
+# Code editing: the attached workspace is in the tree; Ctrl+P opens its
+# README, Ctrl+F highlights in it, Esc G searches every folder.
+dump("workspace in the tree", "fw · code")
+send("\x10", 0.8)                              # Ctrl+P
+send("READ", 1.0)
+dump("quick open", "fw/README")
+send("\r", 0.8)
+send("\x06", 0.3); send("fw", 0.5)             # Ctrl+F
+dump("find bar", "1/1")
+send("\x1b", 0.3)                               # Esc closes the bar
+send("\x1b"); send("G", 0.8)                   # search in files
+send("flux\r", 1.5)
+dump("search in files", "CONTEXT.md (")
+send("\r", 0.8)                                # open the first match
+dump("search result opened", "CONTEXT.md")
+send("\x02", 0.5)                              # Ctrl+B: back to the file tree
 send("\x1b"); send("s", 1.5)                   # new shell
 send("cd code && git branch --show-current && pwd\r", 1.5)
 wait_for("/firmware")

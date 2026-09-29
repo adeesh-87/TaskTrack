@@ -378,6 +378,7 @@ impl App {
                 if let Some(find) = &mut self.find {
                     find.focused = false;
                 }
+                self.completion = None;
             }
             MouseEventKind::Drag(MouseButton::Left) => {
                 let (row, col) = position(ed);

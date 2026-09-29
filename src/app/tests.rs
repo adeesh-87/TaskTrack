@@ -2711,4 +2711,55 @@ fn search_in_files_opens_results_and_f4_steps() {
     let p = h.app.search.as_ref().unwrap();
     assert_eq!(p.scope.as_deref(), Some(code.path().join("src").as_path()));
     assert_eq!(p.query, "foo", "the panel keeps its settings");
+    h.type_str("bar");
+    assert_eq!(
+        h.app.search.as_ref().unwrap().query,
+        "bar",
+        "typing replaces it"
+    );
+}
+
+#[test]
+fn ctrl_space_completes_words_from_open_files() {
+    let mut h = Harness::new(true);
+    let other = h.tasks.join("alpha/scripts/lib.sh");
+    let file = h.tasks.join("alpha/scripts/run.sh");
+    fs::write(&other, "deploy_firmware() { :; }\n").unwrap();
+    fs::write(&file, "deploy_image\n").unwrap();
+    h.press(key(KeyCode::Enter));
+    h.app.request_open_file(&other);
+    h.app.request_open_file(&file);
+    h.press(ctrl('g'));
+    h.type_str("2");
+    h.press(key(KeyCode::Enter));
+    h.type_str("dep");
+    let ctrl_space = KeyEvent::new(KeyCode::Char(' '), KeyModifiers::CONTROL);
+    h.press(ctrl_space);
+    assert_eq!(
+        h.app.completion().unwrap().items,
+        ["deploy_image", "deploy_firmware"],
+        "this file's words first"
+    );
+    // Typing narrows the list; one left still shows until accepted.
+    h.type_str("loy_f");
+    assert_eq!(h.app.completion().unwrap().items, ["deploy_firmware"]);
+    h.press(key(KeyCode::Tab));
+    assert!(h.app.completion().is_none());
+    assert_eq!(
+        h.ctx().editor.as_ref().unwrap().lines()[1],
+        "deploy_firmware"
+    );
+    // A single match is inserted at once; Esc closes the list.
+    h.press(key(KeyCode::Enter));
+    h.type_str("deploy_i");
+    h.press(ctrl_space);
+    assert_eq!(h.ctx().editor.as_ref().unwrap().lines()[2], "deploy_image");
+    h.press(key(KeyCode::Enter));
+    h.type_str("de");
+    h.press(ctrl_space);
+    let rows = screen(&mut h.app, 100, 30);
+    assert!(rows.iter().any(|r| r.contains(" deploy_firmware ")));
+    h.press(key(KeyCode::Esc));
+    assert!(h.app.completion().is_none());
+    assert!(h.app.popup().is_none(), "Esc only closed the list");
 }

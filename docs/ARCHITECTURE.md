@@ -37,8 +37,12 @@ loop: terminal.draw(ui::draw(&mut app)) → wait for next event → app.handle
 | `src/app/help.rs` | the tabbed help page (built from the live config) and the script format texts |
 | `src/app/session.rs` | `session.json`: timer and shells across restarts |
 | `src/app/timer.rs` | pure timer arithmetic (budget, overtime, idle/away, booking minutes, save/restore) |
-| `src/app/context.rs` | `TaskContext`: per-task tree, shells, editor, focus, meta, checkpoints |
+| `src/app/context.rs` | `TaskContext`: per-task tree, shells, editor + `recent` buffers (the Ctrl+Tab stack), focus, meta, checkpoints |
 | `src/app/config_form.rs` | settings page model (`FieldKey`, fields, list editing, `to_config`) |
+| `src/app/find.rs` | the editor's find / replace bar (`FindBar`, `build_regex`, match cache per buffer revision) |
+| `src/app/finder.rs` | Ctrl+P quick open (`FileIndex` built in a thread with the `ignore` crate, `nucleo-matcher` fuzzy / regex) and Ctrl+O path completion (`Popup::Finder`) |
+| `src/app/search.rs` | search in files: `SearchPanel` (kept in `App::search` for F4, shown as `Popup::Search`), parallel walk + regex in a thread, results as `JobEvent::SearchHits` |
+| `src/app/complete.rs` | Ctrl+Space word completion from the open buffers |
 | `src/app/mouse.rs`, `ui_state.rs` | mouse handling (editor drag / word / line selection) and recorded geometry |
 | `src/app/clipboard.rs` | editor copy/paste: internal clipboard, `copy_command` / OSC 52 (written by `main.rs` after a frame), `paste_command` |
 | `src/app/keymap.rs` | leader commands table, key overrides (`[keys]`) and their validation |
@@ -47,8 +51,8 @@ loop: terminal.draw(ui::draw(&mut app)) → wait for next event → app.handle
 | `src/ai/mod.rs` | prompt templates, fixed output formats, `run()` for one-shot agents |
 | `src/git/mod.rs` | `prepare`, main-branch detection, `Change-Id` scan, fetch, push for review, rebase |
 | `src/terminal/` | PTY sessions, key/mouse encoding, VT rendering, shell `cd` integration |
-| `src/editor/`, `src/files/`, `src/highlight/` | text buffer (cursor, selection anchor, word moves, undo), file tree/ops, syntax lexers |
-| `src/ui/` | ratatui drawing: `mod.rs` (layout, status bar, flash), `task_list` (the board), `today` (Home's Today pane), `task_card` (Home's task card), `plan_view`, `audit_view`, `task_view` (sidebar, editor, terminal), `popup`, `config_page`, `theme` |
+| `src/editor/`, `src/files/`, `src/highlight/` | text buffer (cursor, selection anchor, word moves, undo, indentation, CRLF, disk mtime), file tree (task folder + attached roots, `reveal`) / ops, syntax lexers |
+| `src/ui/` | ratatui drawing: `mod.rs` (layout, status bar, flash), `task_list` (the board), `today` (Home's Today pane), `task_card` (Home's task card), `plan_view`, `audit_view`, `task_view` (sidebar, editor with find bar / match highlights / completion list, terminal), `popup`, `search_view`, `config_page`, `theme` |
 | `src/time.rs` | RFC 3339 formatting without a date crate |
 
 ## State on disk

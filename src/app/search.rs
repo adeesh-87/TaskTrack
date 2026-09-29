@@ -118,6 +118,8 @@ pub struct SearchPanel {
     pub scope: Option<PathBuf>,
     /// Part with the keys.
     pub field: Field,
+    /// The query was there when the panel opened: typing replaces it.
+    pub fresh: bool,
     /// Results, sorted by label.
     pub files: Vec<FileHits>,
     /// Selected row of [`Self::rows`].
@@ -151,6 +153,7 @@ impl SearchPanel {
             root_cursor: 0,
             scope: None,
             field: Field::Query,
+            fresh: false,
             files: Vec::new(),
             selected: 0,
             scroll: 0,
@@ -422,6 +425,7 @@ impl App {
             panel.query = t;
         }
         panel.field = Field::Query;
+        panel.fresh = !panel.query.is_empty();
         self.popup = Some(Popup::Search);
     }
 
@@ -542,6 +546,18 @@ impl App {
             return;
         };
         let mut keep = true;
+        // A query that was there on opening is replaced by typing.
+        if std::mem::take(&mut p.fresh) && p.field == Field::Query {
+            match key.code {
+                KeyCode::Char(_) if !ctrl && !alt => p.query.clear(),
+                KeyCode::Backspace => {
+                    p.query.clear();
+                    self.popup = Some(Popup::Search);
+                    return;
+                }
+                _ => {}
+            }
+        }
         match key.code {
             KeyCode::Esc => {
                 keep = false;
@@ -642,8 +658,13 @@ impl App {
         if !matches!(self.popup, Some(Popup::Search)) {
             return false;
         }
-        if let Some(t) = self.search.as_mut().and_then(SearchPanel::field_text) {
-            t.push_str(text.lines().next().unwrap_or(""));
+        if let Some(p) = self.search.as_mut() {
+            if std::mem::take(&mut p.fresh) && p.field == Field::Query {
+                p.query.clear();
+            }
+            if let Some(t) = p.field_text() {
+                t.push_str(text.lines().next().unwrap_or(""));
+            }
         }
         true
     }

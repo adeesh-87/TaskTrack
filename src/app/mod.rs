@@ -4,6 +4,7 @@
 //! [`AppEvent`]s. Drawing lives in [`crate::ui`] and only reads this state
 //! (plus lazily resizing shells to fit their pane).
 
+pub mod complete;
 pub mod config_form;
 pub mod context;
 pub mod event;
@@ -187,6 +188,8 @@ pub struct App {
     file_index: finder::FileIndex,
     /// Search in files (Ctrl+Shift+F), kept for F4.
     search: Option<search::SearchPanel>,
+    /// Word completion list (Ctrl+Space).
+    completion: Option<complete::Completion>,
 }
 
 impl App {
@@ -268,6 +271,7 @@ impl App {
             find: None,
             file_index: finder::FileIndex::default(),
             search: None,
+            completion: None,
         };
         app.config_mtime = app.config_file_mtime();
         if matches!(app.mode, Mode::Home) {
@@ -1850,6 +1854,9 @@ impl App {
         // In the editor and the file tree, editor keys (Ctrl+B, Ctrl+Tab,
         // Ctrl+P, …) win over the leader; the leader still works in the
         // terminal and the shell list.
+        if focus == Focus::Editor && !self.leader_pending && self.handle_completion_key(key) {
+            return;
+        }
         if focus == Focus::Editor && !self.leader_pending && self.handle_find_key(key) {
             return;
         }
@@ -1880,6 +1887,10 @@ impl App {
             }
             (KeyCode::Char('?'), _) if focus != Focus::Editor => {
                 self.run_action(Action::Help);
+                return;
+            }
+            (KeyCode::Char(' '), KeyModifiers::CONTROL) if focus == Focus::Editor => {
+                self.open_completion();
                 return;
             }
             (KeyCode::F(4), m) if focus == Focus::Editor => {

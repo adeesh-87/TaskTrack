@@ -497,11 +497,72 @@ fn draw_editor(frame: &mut Frame<'_>, app: &mut App, area: Rect, theme: &Theme) 
             }
         }
     }
+    if let (true, Some(c), Some((cx, cy))) = (focused, app.completion(), cursor_pos) {
+        draw_completion(
+            frame,
+            c,
+            inner,
+            (inner.x + gutter + cx, inner.y + cy),
+            theme,
+        );
+    }
     app.ui.editor = inner;
     app.ui.editor_gutter = gutter;
     app.ui.editor_hscroll = hscroll;
     app.ui.editor_rows = rows;
     app.set_editor_height(inner.height as usize);
+}
+
+/// The Ctrl+Space list under (or above) the cursor at `at`.
+fn draw_completion(
+    frame: &mut Frame<'_>,
+    c: &crate::app::complete::Completion,
+    area: Rect,
+    at: (u16, u16),
+    theme: &Theme,
+) {
+    let rows = c.items.len().min(8) as u16;
+    let width = c
+        .items
+        .iter()
+        .map(|w| w.chars().count())
+        .max()
+        .unwrap_or(0)
+        .min(40) as u16
+        + 2;
+    if area.width < width || area.height < rows + 1 {
+        return;
+    }
+    let x = at.0.min(area.x + area.width - width);
+    let y = if at.1 + 1 + rows <= area.y + area.height {
+        at.1 + 1
+    } else {
+        at.1.saturating_sub(rows).max(area.y)
+    };
+    let rect = Rect {
+        x,
+        y,
+        width,
+        height: rows,
+    };
+    let first = c.selected.saturating_sub(rows as usize - 1);
+    let lines: Vec<Line<'_>> = c
+        .items
+        .iter()
+        .enumerate()
+        .skip(first)
+        .take(rows as usize)
+        .map(|(i, w)| {
+            let style = if i == c.selected {
+                theme.selected(true)
+            } else {
+                Style::new().bg(theme.bar_bg).fg(theme.fg)
+            };
+            Line::styled(format!(" {w:<w2$} ", w2 = width as usize - 2), style)
+        })
+        .collect();
+    frame.render_widget(ratatui::widgets::Clear, rect);
+    frame.render_widget(Paragraph::new(lines), rect);
 }
 
 /// Mark the find matches on the visible rows (the selected one already
