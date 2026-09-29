@@ -561,7 +561,34 @@ fn enter_task_browse_files_and_edit() {
         fs::read_to_string(h.tasks.join("alpha/scripts/run.sh")).unwrap(),
         "echo hi# edited\n"
     );
-    // Esc from the editor opens the palette; W closes the buffer.
+    // The first Esc in the editor leaves the text: Tab / Shift+Tab then move
+    // between panes (the editor included) until another key.
+    h.press(key(KeyCode::Esc));
+    assert!(h.app.pane_nav() && h.app.popup().is_none());
+    h.press(KeyEvent::new(KeyCode::BackTab, KeyModifiers::SHIFT));
+    assert_eq!(h.ctx().focus, Focus::Tree);
+    h.press(key(KeyCode::Tab));
+    assert_eq!(h.ctx().focus, Focus::Editor);
+    assert!(h.app.pane_nav());
+    let rows = screen(&mut h.app, 120, 30);
+    assert!(rows[29].contains("panes: Tab"), "{}", rows[29]);
+    // Enter stays; typing goes to the text again.
+    h.press(key(KeyCode::Enter));
+    assert!(!h.app.pane_nav());
+    h.press(key(KeyCode::Esc));
+    h.press(key(KeyCode::Char('x')));
+    assert!(!h.app.pane_nav());
+    assert!(h
+        .ctx()
+        .editor
+        .as_ref()
+        .unwrap()
+        .text()
+        .contains("# editedx"));
+    h.press(key(KeyCode::Backspace));
+    h.press(ctrl('s'));
+    // The second Esc opens the palette; W closes the buffer.
+    h.press(key(KeyCode::Esc));
     h.press(key(KeyCode::Esc));
     assert!(matches!(h.app.popup(), Some(Popup::Palette(_))));
     h.press(key(KeyCode::Char('W')));
@@ -685,6 +712,7 @@ fn switching_tasks_keeps_each_context() {
     h.press(key(KeyCode::Down));
     h.press(key(KeyCode::Enter));
     assert!(h.ctx().editor.is_some());
+    h.press(key(KeyCode::Esc));
     h.press(key(KeyCode::Esc));
     h.press(key(KeyCode::Char('T')));
     h.press(key(KeyCode::Down));
@@ -2401,6 +2429,7 @@ fn open_files_stack_ctrl_tab_ctrl_e_and_ctrl_b() {
         .path()
         .ends_with("CONTEXT.md"));
     h.press(key(KeyCode::Esc));
+    h.press(key(KeyCode::Esc));
     h.press(key(KeyCode::Char('q')));
     assert!(popup_title(&h.app).contains("Quit"));
 }
@@ -2840,6 +2869,7 @@ fn pahiri_edit_is_the_code_editor_alone() {
     h.press(key(KeyCode::Esc));
     // The palette only has editor commands; task actions are refused.
     h.press(key(KeyCode::Esc));
+    h.press(key(KeyCode::Esc));
     let Some(Popup::Palette(p)) = h.app.popup() else {
         panic!("no palette");
     };
@@ -2858,6 +2888,7 @@ fn pahiri_edit_is_the_code_editor_alone() {
     assert!(!h.root.join("state/session.json").exists());
     let rows = screen(&mut h.app, 100, 30);
     assert!(rows[29].contains("pahiri edit"));
+    h.press(key(KeyCode::Esc));
     h.press(key(KeyCode::Esc));
     h.press(key(KeyCode::Char('q')));
     assert!(h.app.should_quit());

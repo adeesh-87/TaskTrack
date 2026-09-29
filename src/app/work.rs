@@ -607,7 +607,8 @@ impl App {
                 .map(|j| self.plan_item_label(j));
             let next =
                 in_plan.or_else(|| self.next_checkpoint_label(&t.task_id, t.checkpoint.as_deref()));
-            let over = t.remaining_secs(now) < 0;
+            // Time is up from 00:00 on (as for the alarm).
+            let over = t.remaining_secs(now) <= 0;
             if t.is_running() {
                 if !over {
                     choices.push(("pause".to_owned(), Pending::TimerPause));

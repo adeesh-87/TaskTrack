@@ -122,6 +122,9 @@ pub struct App {
     next_shell_id: ShellId,
     leader: KeyCombo,
     leader_pending: bool,
+    /// Esc in the editor: Tab / Shift+Tab move between panes until another
+    /// key (Esc again: the menu).
+    pane_nav: bool,
     events: EventSender,
     editor_height: usize,
     /// Whether leaving the settings page returns to the task view (else the list).
@@ -235,6 +238,7 @@ impl App {
             next_shell_id: 1,
             leader,
             leader_pending: false,
+            pane_nav: false,
             events,
             editor_height: 20,
             config_returns_to_task: false,
@@ -430,6 +434,11 @@ impl App {
         self.leader_pending
     }
 
+    /// Whether Tab moves between panes (after Esc in the editor).
+    pub fn pane_nav(&self) -> bool {
+        self.pane_nav
+    }
+
     /// Selected row in the task list.
     pub fn list_selected(&self) -> usize {
         self.list_selected
@@ -564,7 +573,10 @@ impl App {
         match event {
             AppEvent::Input(Event::Key(key)) => self.handle_key(key),
             AppEvent::Input(Event::Paste(text)) => self.handle_paste(&text),
-            AppEvent::Input(Event::Mouse(m)) => self.handle_mouse(m),
+            AppEvent::Input(Event::Mouse(m)) => {
+                self.pane_nav = false;
+                self.handle_mouse(m);
+            }
             AppEvent::Input(Event::Resize(..) | Event::FocusGained | Event::FocusLost) => {}
             AppEvent::Tick => self.on_tick(),
             AppEvent::Pty(PtyEvent::Output { id, data }) => {
@@ -1946,6 +1958,29 @@ impl App {
             self.mode = Mode::Home;
             return;
         };
+        // After Esc in the editor: Tab / Shift+Tab move between panes (the
+        // editor included), Esc opens the menu, anything else stays here.
+        if std::mem::take(&mut self.pane_nav) {
+            match key.code {
+                KeyCode::Tab | KeyCode::BackTab
+                    if !key.modifiers.contains(KeyModifiers::CONTROL) =>
+                {
+                    let forward =
+                        key.code == KeyCode::Tab && !key.modifiers.contains(KeyModifiers::SHIFT);
+                    if let Some(ctx) = self.active_context_mut() {
+                        ctx.cycle_focus(forward);
+                    }
+                    self.pane_nav = true;
+                    return;
+                }
+                KeyCode::Esc => {
+                    self.open_palette();
+                    return;
+                }
+                KeyCode::Enter => return,
+                _ => {}
+            }
+        }
         // Pane navigation works from every pane, including the terminal.
         if !self.leader_pending {
             if let Some(handled) = self.handle_pane_keys(key) {
@@ -1983,11 +2018,17 @@ impl App {
             return;
         }
         match (key.code, key.modifiers) {
+            // In the editor the first Esc leaves the text (Tab then moves
+            // between panes); the second opens the menu.
+            (KeyCode::Esc, _) if focus == Focus::Editor => {
+                self.pane_nav = true;
+                return;
+            }
             (KeyCode::Esc, _) => {
                 self.open_palette();
                 return;
             }
-            // In the editor Ctrl+C copies; quit from there with Esc q.
+            // In the editor Ctrl+C copies; quit from there with Esc Esc q.
             (KeyCode::Char('c'), KeyModifiers::CONTROL) if focus != Focus::Editor => {
                 self.request_quit();
                 return;

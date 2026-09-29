@@ -62,7 +62,9 @@ Also named: the **Palette** (`Esc`), the **Leader** key (`Ctrl+B`), the
 
 ## The command palette (`Esc`)
 
-`Esc` opens the palette anywhere except inside a shell (there, `leader Esc`).
+`Esc` opens the palette anywhere except inside a shell (there, `leader Esc`)
+and the editor, where the first `Esc` leaves the text (then `Tab` /
+`Shift+Tab` move between panes) and a second `Esc` opens the palette.
 Press a shortcut letter to run a command straight away, or `:` to type and
 filter, `Enter` to run, `Esc` to close.
 
@@ -99,6 +101,10 @@ filter, `Enter` to run, `Esc` to close.
 
 ### Panes and shells
 
+* In the editor `Esc` then `Tab` / `Shift+Tab` move to the next / previous
+  pane, as many times as you like (`Enter` or any other key stays there;
+  `Esc` again opens the palette) — no leader or Ctrl keys needed, handy when
+  pahiri runs inside tmux, herdr or another program that takes `Ctrl+B`.
 * `Alt+]` / `Alt+[` cycle files → editor → shells → terminal, from every
   pane including the terminal. `Ctrl+Tab` / `Ctrl+Shift+Tab` do the same
   from the shells and the terminal; in the editor and the file tree they
@@ -178,7 +184,7 @@ emulator as usual. `mouse = false` in the config turns capture off.
 | `Ctrl+S` / `Ctrl+W` | save / close |
 
 Typing, `Enter`, `Backspace` or a paste replace the selection. In the editor
-`Ctrl+C` copies; quit with `Esc` `q`.
+`Ctrl+C` copies; quit with `Esc` `Esc` `q`.
 
 **Clipboard.** Copied text goes to your system clipboard through OSC 52,
 which most terminals support (kitty, WezTerm, Alacritty, foot, iTerm2,
