@@ -2537,3 +2537,87 @@ fn find_bar_searches_steps_and_replaces() {
     assert!(!ed(&h).is_dirty());
     assert!(h.app.find_bar().unwrap().open);
 }
+
+fn finder(h: &Harness) -> &finder::Finder {
+    match h.app.popup() {
+        Some(Popup::Finder(f)) => f,
+        other => panic!("no finder: {other:?}"),
+    }
+}
+
+#[test]
+fn quick_open_and_path_opener() {
+    let code = tempfile::tempdir().unwrap();
+    fs::create_dir_all(code.path().join("src/net")).unwrap();
+    fs::write(code.path().join("src/net/socket.c"), "a\nb\nc\nd\n").unwrap();
+    fs::write(code.path().join("src/main.c"), "int main;\n").unwrap();
+    let dir = code.path().to_path_buf();
+    let mut h = Harness::build(true, move |cfg| {
+        cfg.workspaces = vec![Workspace {
+            name: "fw".into(),
+            path: dir.clone(),
+            main_branch: None,
+        }];
+        crate::tasks::context::update_meta(&cfg.tasks_dir.join("alpha/CONTEXT.md"), "alpha", |m| {
+            m.workspaces = vec!["fw".into()];
+        })
+        .unwrap();
+    });
+    h.press(key(KeyCode::Enter));
+    h.press(key(KeyCode::Char('f')));
+    // Ctrl+P: recent files until 2 characters, then the index (built in the
+    // background) over the task folder and the code workspaces.
+    h.press(ctrl('p'));
+    assert!(finder(&h).note.starts_with("recent files"));
+    assert!(h.pump_until(|app| !app.file_index.building));
+    h.type_str("s");
+    assert!(
+        finder(&h).note.starts_with("recent files"),
+        "1 char: no search"
+    );
+    h.type_str("ock:3");
+    assert_eq!(finder(&h).items[0].label, "fw/src/net/socket.c");
+    h.press(key(KeyCode::Enter));
+    let ed = h.ctx().editor.as_ref().unwrap();
+    assert_eq!(ed.path(), code.path().join("src/net/socket.c"));
+    assert_eq!(ed.cursor(), (2, 0), "name:line jumps to the line");
+    // Regex mode; Esc closes.
+    h.press(ctrl('p'));
+    h.type_str(r"ma[i]n\.c$");
+    assert!(finder(&h).note.starts_with("regex · 1 of"));
+    h.press(key(KeyCode::Esc));
+    assert!(h.app.popup().is_none());
+    // Ctrl+O starts in the open file's folder; Tab takes an entry, typing
+    // goes on, Enter on a file opens it.
+    h.press(ctrl('o'));
+    assert!(finder(&h).query.ends_with("src/net/"));
+    h.press(KeyEvent::new(KeyCode::Backspace, KeyModifiers::CONTROL));
+    assert!(finder(&h).query.ends_with("src/"));
+    h.type_str("ma");
+    assert_eq!(finder(&h).items[0].label, "main.c");
+    h.press(key(KeyCode::Tab));
+    assert!(finder(&h).query.ends_with("src/main.c"));
+    h.press(key(KeyCode::Enter));
+    assert_eq!(
+        h.ctx().editor.as_ref().unwrap().path(),
+        code.path().join("src/main.c")
+    );
+    // Ctrl+Enter opens what is typed: a new file after asking.
+    h.press(ctrl('o'));
+    h.type_str("new/x.h");
+    h.press(KeyEvent::new(KeyCode::Enter, KeyModifiers::CONTROL));
+    assert_eq!(h.app.popup().unwrap().title(), "New file");
+    h.press(key(KeyCode::Char('y')));
+    let made = code.path().join("src/new/x.h");
+    assert!(made.is_file());
+    assert_eq!(h.ctx().editor.as_ref().unwrap().path(), made);
+    // … a folder shows in the file tree.
+    h.press(ctrl('o'));
+    h.press(KeyEvent::new(KeyCode::Backspace, KeyModifiers::CONTROL));
+    h.press(KeyEvent::new(KeyCode::Enter, KeyModifiers::ALT));
+    assert_eq!(h.ctx().focus, Focus::Tree);
+    assert_eq!(
+        h.ctx().tree.selected().unwrap().path,
+        code.path().join("src")
+    );
+}

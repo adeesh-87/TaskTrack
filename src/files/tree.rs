@@ -241,6 +241,23 @@ impl FileTree {
         }
     }
 
+    /// Expand the folders down to `path` and select it. Returns whether it
+    /// is in the tree.
+    pub fn reveal(&mut self, path: &Path) -> io::Result<bool> {
+        let root = self.root_of(path).to_path_buf();
+        if !path.starts_with(&root) {
+            return Ok(false);
+        }
+        let mut dir = path.parent();
+        while let Some(d) = dir.filter(|d| d.starts_with(&root) && *d != self.root) {
+            self.expanded.insert(d.to_path_buf());
+            dir = d.parent();
+        }
+        self.refresh()?;
+        self.select_path(path);
+        Ok(self.selected().is_some_and(|n| n.path == path))
+    }
+
     /// Expand or collapse the selected directory. Returns `true` if it was a directory.
     pub fn toggle_selected(&mut self) -> io::Result<bool> {
         let Some(node) = self.selected() else {
@@ -373,6 +390,15 @@ mod tests {
         // Collapsing on a file inside the root walks up to its folder.
         tree.collapse_selected().unwrap();
         assert_eq!(tree.selected().unwrap().name, "src");
+        // Revealing a file expands the folders down to it.
+        tree.select_last();
+        tree.collapse_selected().unwrap();
+        tree.select_first();
+        tree.select_last();
+        tree.collapse_selected().unwrap();
+        assert!(tree.reveal(&main).unwrap());
+        assert_eq!(tree.selected().unwrap().path, main);
+        assert!(!tree.reveal(Path::new("/elsewhere/x")).unwrap());
     }
 
     #[test]

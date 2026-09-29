@@ -86,6 +86,8 @@ pub enum Pending {
     SwitchFile(std::path::PathBuf),
     /// Move the cursor to the entered line[:column].
     GotoLine,
+    /// Create this file (and its folders) and open it.
+    CreatePath(PathBuf),
     /// Apply the ticked audit proposals.
     AuditApply,
     /// Leave the Audit view without applying.
@@ -206,6 +208,8 @@ pub enum Popup {
     },
     /// The command palette.
     Palette(super::palette::Palette),
+    /// Ctrl+P / Ctrl+O.
+    Finder(Box<super::finder::Finder>),
     /// Scrollable read-only text.
     Doc {
         /// Title.
@@ -307,6 +311,7 @@ impl Popup {
             | Popup::Doc { title, .. } => title,
             Popup::Tickets { source, .. } => source,
             Popup::Palette(_) => "commands",
+            Popup::Finder(f) => f.title(),
             Popup::Checkpoints { .. } => "checkpoints",
             Popup::Help { .. } => "help",
         }

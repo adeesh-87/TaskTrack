@@ -8,6 +8,7 @@ pub mod config_form;
 pub mod context;
 pub mod event;
 pub mod find;
+pub mod finder;
 pub mod keymap;
 pub mod palette;
 pub mod popup;
@@ -181,6 +182,8 @@ pub struct App {
     leader_table: Vec<(char, LeaderCmd)>,
     /// Find bar of the editor (Ctrl+F).
     find: Option<find::FindBar>,
+    /// Files for quick open (Ctrl+P).
+    file_index: finder::FileIndex,
 }
 
 impl App {
@@ -260,6 +263,7 @@ impl App {
             watched: Instant::now(),
             leader_table,
             find: None,
+            file_index: finder::FileIndex::default(),
         };
         app.config_mtime = app.config_file_mtime();
         if matches!(app.mode, Mode::Home) {
@@ -503,6 +507,9 @@ impl App {
     }
 
     fn handle_paste(&mut self, text: &str) {
+        if self.finder_paste(text) {
+            return;
+        }
         match &mut self.popup {
             Some(Popup::Input { value, .. }) => {
                 value.push_str(text.lines().next().unwrap_or(""));
@@ -1670,6 +1677,11 @@ impl App {
                     lines.push(line);
                 }
             }
+            JobEvent::FileIndex {
+                roots,
+                files,
+                truncated,
+            } => self.index_built(&roots, files, truncated),
             JobEvent::Finished(line) => {
                 if let Some(Popup::Log { lines, done, .. }) = &mut self.popup {
                     lines.push(String::new());
@@ -1916,7 +1928,7 @@ impl App {
                 if focus == Focus::Editor {
                     ctx.focus = Focus::Tree;
                     if let Some(p) = ctx.editor.as_ref().map(|e| e.path().to_path_buf()) {
-                        ctx.tree.select_path(&p);
+                        let _ = ctx.tree.reveal(&p);
                     }
                 } else if ctx.editor.is_some() {
                     ctx.focus = Focus::Editor;
@@ -1930,6 +1942,8 @@ impl App {
                 }
             }
             KeyCode::Char('e') if !shift => self.open_recent_menu(),
+            KeyCode::Char('p') if !shift => self.open_quick_open(),
+            KeyCode::Char('o') if !shift => self.open_path_prompt(),
             KeyCode::Char('g') if !shift && focus == Focus::Editor => {
                 let lines = ctx.editor.as_ref().map_or(0, |e| e.lines().len());
                 self.popup = Some(Popup::input(
@@ -2624,6 +2638,7 @@ impl App {
         };
         match popup {
             Popup::Message { .. } => {}
+            Popup::Finder(f) => self.handle_finder_key(f, key),
             Popup::Log {
                 title,
                 mut lines,
@@ -3027,6 +3042,26 @@ impl App {
                 }
             }
             Pending::SwitchFile(path) => self.request_open_file(&path),
+            Pending::CreatePath(path) => {
+                let made = path
+                    .parent()
+                    .map_or(Ok(()), std::fs::create_dir_all)
+                    .and_then(|()| {
+                        std::fs::OpenOptions::new()
+                            .write(true)
+                            .create_new(true)
+                            .open(&path)
+                    });
+                match made {
+                    Ok(_) => {
+                        if let Some(ctx) = self.active_context_mut() {
+                            let _ = ctx.tree.refresh();
+                        }
+                        self.open_at(&path, None);
+                    }
+                    Err(e) => self.error(format!("cannot create {}: {e}", path.display())),
+                }
+            }
             Pending::GotoLine => {
                 let text = input.unwrap_or_default();
                 let mut parts = text.trim().split([':', ',', ' ']);

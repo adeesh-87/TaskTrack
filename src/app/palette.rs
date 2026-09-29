@@ -283,7 +283,7 @@ pub fn task_commands() -> Vec<Command> {
         cmd('E', "edit AI prompt templates", Action::EditPrompts),
         cmd(
             'F',
-            "find in the editor (then F3 / Ctrl+G for next)",
+            "find in the editor (Ctrl+F; F3 next, Ctrl+R replace)",
             Action::Find,
         ),
         cmd('s', "new shell", Action::NewShell),
