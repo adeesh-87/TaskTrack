@@ -216,6 +216,9 @@ impl App {
         extra: Vec<(String, String)>,
         then: AfterHook,
     ) {
+        if self.code_mode {
+            return;
+        }
         let Some(command) = self
             .config
             .hooks

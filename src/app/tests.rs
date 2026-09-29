@@ -100,6 +100,31 @@ impl Harness {
         Self::build(with_config, |_| {})
     }
 
+    /// `pahiri edit` over folders / files made by `setup` in a temp folder
+    /// (given as paths relative to it).
+    fn editor(setup: impl FnOnce(&Path), paths: &[&str]) -> Self {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path().to_path_buf();
+        setup(&root);
+        let (tx, rx) = EventSender::channel();
+        let paths: Vec<std::path::PathBuf> = paths.iter().map(|p| root.join(p)).collect();
+        let app = App::new_editor(
+            Config::default(),
+            root.join("config.toml"),
+            root.join("state"),
+            tx,
+            &paths,
+        )
+        .unwrap();
+        Self {
+            app,
+            rx,
+            _dir: dir,
+            tasks: root.join("no-tasks"),
+            root,
+        }
+    }
+
     fn press(&mut self, k: KeyEvent) {
         self.app.handle(AppEvent::Input(Event::Key(k)));
     }
@@ -2762,4 +2787,69 @@ fn ctrl_space_completes_words_from_open_files() {
     h.press(key(KeyCode::Esc));
     assert!(h.app.completion().is_none());
     assert!(h.app.popup().is_none(), "Esc only closed the list");
+}
+
+#[test]
+fn pahiri_edit_is_the_code_editor_alone() {
+    let mut h = Harness::editor(
+        |root| {
+            fs::create_dir_all(root.join("fw/src")).unwrap();
+            fs::write(root.join("fw/src/main.c"), "int main;\n").unwrap();
+            fs::create_dir_all(root.join("app")).unwrap();
+            fs::write(root.join("app/app.py"), "print(1)\n").unwrap();
+            fs::write(root.join("notes.txt"), "hi\n").unwrap();
+        },
+        &["fw", "app", "notes.txt"],
+    );
+    assert!(h.app.is_code_mode());
+    assert!(matches!(h.app.mode(), Mode::Task));
+    // The first folder is the tree's root, the others extra roots; the file is open.
+    assert_eq!(
+        h.ctx().tree.root(),
+        h.root.join("fw").canonicalize().unwrap()
+    );
+    let names: Vec<String> = h
+        .ctx()
+        .tree
+        .nodes()
+        .iter()
+        .map(|n| n.name.clone())
+        .collect();
+    assert_eq!(names, ["src", "app"]);
+    assert!(h
+        .ctx()
+        .editor
+        .as_ref()
+        .unwrap()
+        .path()
+        .ends_with("notes.txt"));
+    // Quick open searches every folder.
+    h.press(ctrl('p'));
+    assert!(h.pump_until(|app| !app.file_index.building));
+    h.type_str("app.py");
+    assert_eq!(finder(&h).items[0].label, "app/app.py");
+    h.press(key(KeyCode::Esc));
+    // The palette only has editor commands; task actions are refused.
+    h.press(key(KeyCode::Esc));
+    let Some(Popup::Palette(p)) = h.app.popup() else {
+        panic!("no palette");
+    };
+    assert!(p.matches().iter().all(|c| c.action.in_editor()));
+    assert!(p.matches().iter().any(|c| c.action == Action::SearchFiles));
+    h.press(key(KeyCode::Esc));
+    h.app.run_action(Action::Timer);
+    assert!(h.app.timer.is_none());
+    assert!(h
+        .app
+        .status()
+        .unwrap_or_default()
+        .contains("not in pahiri edit"));
+    // Nothing of pahiri's session is written; leaving means quitting.
+    h.app.save_session();
+    assert!(!h.root.join("state/session.json").exists());
+    let rows = screen(&mut h.app, 100, 30);
+    assert!(rows[29].contains("pahiri edit"));
+    h.press(key(KeyCode::Esc));
+    h.press(key(KeyCode::Char('q')));
+    assert!(h.app.should_quit());
 }

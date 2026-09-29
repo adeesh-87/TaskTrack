@@ -381,13 +381,18 @@ impl App {
         let Some(ctx) = self.active_context() else {
             return Vec::new();
         };
+        let first = if self.code_mode {
+            ctx.id.clone()
+        } else {
+            "task".to_owned()
+        };
         ctx.tree
             .roots()
             .into_iter()
             .enumerate()
             .map(|(i, (label, path))| SearchRoot {
                 on: !label.ends_with(" · build"),
-                label: if i == 0 { "task".into() } else { label },
+                label: if i == 0 { first.clone() } else { label },
                 path,
             })
             .collect()
@@ -460,9 +465,11 @@ impl App {
         let roots: Vec<(String, PathBuf, PathBuf)> = p
             .roots
             .iter()
-            .filter(|r| r.on)
-            .filter_map(|r| {
-                let label = if r.label == "task" {
+            .enumerate()
+            .filter(|(_, r)| r.on)
+            .filter_map(|(i, r)| {
+                // The first root (the task folder) shows its paths bare.
+                let label = if i == 0 {
                     String::new()
                 } else {
                     r.label.split(" · ").next().unwrap_or(&r.label).to_owned()

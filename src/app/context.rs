@@ -155,6 +155,17 @@ pub struct TaskContext {
     /// Modification time of the context file when it was last read.
     context_mtime: Option<SystemTime>,
     next_number: usize,
+    /// `pahiri edit`: the folders after the first, fixed (not from the
+    /// task's attachments). `None` for a task.
+    pub fixed_roots: Option<Vec<(String, PathBuf)>>,
+}
+
+/// The name a folder is shown by.
+fn folder_name(path: &Path) -> String {
+    path.file_name().map_or_else(
+        || path.display().to_string(),
+        |n| n.to_string_lossy().into_owned(),
+    )
 }
 
 fn mtime(path: &Path) -> Option<SystemTime> {
@@ -187,6 +198,42 @@ impl TaskContext {
             checkpoints,
             context_mtime: mtime(context_path),
             next_number: 1,
+            fixed_roots: None,
+        })
+    }
+
+    /// The context of `pahiri edit`: the given folders (the first is the
+    /// main one), no task behind them.
+    pub fn standalone(roots: &[PathBuf], show_hidden: bool) -> io::Result<Self> {
+        let first = roots.first().cloned().unwrap_or_else(|| PathBuf::from("."));
+        let extra: Vec<(String, PathBuf)> = roots
+            .iter()
+            .skip(1)
+            .map(|p| (folder_name(p), p.clone()))
+            .collect();
+        let mut tree = FileTree::new(&first, show_hidden)?;
+        tree.set_extra_roots(extra.clone())?;
+        Ok(Self {
+            id: folder_name(&first),
+            dir: first,
+            context_path: PathBuf::new(),
+            meta: TaskMeta::default(),
+            tree,
+            shells: Vec::new(),
+            selected_shell: 0,
+            editor: None,
+            recent: Vec::new(),
+            cycle: None,
+            positions: std::collections::HashMap::new(),
+            focus: Focus::Tree,
+            show_shell: true,
+            zoomed: false,
+            env_file: None,
+            highlight: None,
+            checkpoints: Vec::new(),
+            context_mtime: None,
+            next_number: 1,
+            fixed_roots: Some(extra),
         })
     }
 
@@ -212,6 +259,16 @@ impl TaskContext {
 
     /// Environment describing this task for shells.
     pub fn task_env(&self, config: &Config) -> TaskEnv {
+        if let Some(roots) = &self.fixed_roots {
+            return TaskEnv {
+                task: String::new(),
+                task_dir: self.dir.clone(),
+                code: std::iter::once((self.id.clone(), self.dir.clone()))
+                    .chain(roots.iter().cloned())
+                    .collect(),
+                builds: Vec::new(),
+            };
+        }
         TaskEnv {
             task: self.id.clone(),
             task_dir: self.dir.clone(),
@@ -349,6 +406,9 @@ impl TaskContext {
 
     /// Show the attached code workspaces and builds in the file tree.
     pub fn sync_roots(&mut self, config: &Config) {
+        if self.fixed_roots.is_some() {
+            return;
+        }
         let workspaces = self
             .meta
             .workspaces

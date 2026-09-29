@@ -21,7 +21,7 @@ use pahiri::config::Config;
 #[command(name = "pahiri", version, about)]
 struct Cli {
     /// Config file to use instead of the default location.
-    #[arg(short, long, value_name = "FILE")]
+    #[arg(short, long, value_name = "FILE", global = true)]
     config: Option<PathBuf>,
     /// Override the tasks folder for this run (also seeds a first-run config).
     #[arg(short, long, value_name = "DIR")]
@@ -39,6 +39,14 @@ struct Cli {
 #[allow(clippy::doc_markdown)] // doc comments double as --help text
 #[derive(Debug, Subcommand)]
 enum Cmd {
+    /// The code editor alone, without tasks: `pahiri edit ~/src/fw ~/src/app
+    /// notes.txt`. Folders become the file tree's roots, files are opened
+    /// (default: the current folder). Also runs as `pahiri-edit` (a link to
+    /// this binary). Works without a config.
+    Edit {
+        /// Folders and files.
+        paths: Vec<PathBuf>,
+    },
     /// Task helpers for scripts and agents (default task: $PAHIRI_TASK).
     Task {
         #[command(subcommand)]
@@ -252,7 +260,9 @@ fn run_command(cmd: Cmd, config: Option<&Config>, config_path: &std::path::Path)
         Cmd::Trash {
             cmd: TrashCmd::Empty { older_than },
         } => cli::trash_empty(cfg, &older_than)?,
-        Cmd::InstallSkills { .. } | Cmd::Config { .. } => unreachable!("handled above"),
+        Cmd::InstallSkills { .. } | Cmd::Config { .. } | Cmd::Edit { .. } => {
+            unreachable!("handled above")
+        }
     };
     println!("{out}");
     Ok(())
@@ -278,7 +288,16 @@ fn init_logging(level: &str) -> Option<PathBuf> {
 }
 
 fn main() -> Result<()> {
-    let cli = Cli::parse();
+    // Started as `pahiri-edit` (a link to this binary): `pahiri edit`.
+    let mut args: Vec<std::ffi::OsString> = std::env::args_os().collect();
+    let as_editor = args
+        .first()
+        .and_then(|a| std::path::Path::new(a).file_stem())
+        .is_some_and(|n| n == "pahiri-edit");
+    if as_editor {
+        args.insert(1, "edit".into());
+    }
+    let mut cli = Cli::parse_from(args);
     let log_path = init_logging(&cli.log_level);
 
     // Commands run from hooks and pahiri shells use the config of the pahiri
@@ -300,9 +319,11 @@ fn main() -> Result<()> {
         config = Some(cfg);
     }
 
-    if let Some(cmd) = cli.cmd {
-        return run_command(cmd, config.as_ref(), &config_path);
-    }
+    let edit = match cli.cmd.take() {
+        Some(Cmd::Edit { paths }) => Some(paths),
+        Some(cmd) => return run_command(cmd, config.as_ref(), &config_path),
+        None => None,
+    };
 
     if cli.show_config {
         println!("config file: {}", config_path.display());
@@ -333,7 +354,16 @@ fn main() -> Result<()> {
         .tasks_dir
         .as_ref()
         .map(|d| Config::expand_tilde(&d.display().to_string()));
-    let mut app = App::new(config, config_path, state_dir, tx.clone());
+    let mut app = match edit {
+        Some(paths) => App::new_editor(
+            config.unwrap_or_default(),
+            config_path,
+            state_dir,
+            tx.clone(),
+            &paths,
+        )?,
+        None => App::new(config, config_path, state_dir, tx.clone()),
+    };
     if let Some(dir) = tasks_dir_override {
         app.set_tasks_dir_override(dir);
     }

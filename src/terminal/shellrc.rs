@@ -212,7 +212,13 @@ impl TaskEnv {
     pub fn write(&self, state_dir: &Path) -> io::Result<PathBuf> {
         let dir = state_dir.join("tasks");
         fs::create_dir_all(&dir)?;
-        let path = dir.join(format!("{}.env", self.task));
+        // `pahiri edit` has no task: one file per editor.
+        let name = if self.task.is_empty() {
+            format!("edit-{}", std::process::id())
+        } else {
+            self.task.clone()
+        };
+        let path = dir.join(format!("{name}.env"));
         fs::write(&path, self.render())?;
         Ok(path)
     }

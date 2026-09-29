@@ -19,12 +19,24 @@ use super::Theme;
 
 /// Left column inside a task: task header, file tree, shell list.
 pub fn draw_sidebar(frame: &mut Frame<'_>, app: &mut App, area: Rect, theme: &Theme) {
+    let code_mode = app.is_code_mode();
     let Some(ctx) = app.active_context() else {
         return;
     };
-    let summary = ctx.attachment_summary();
-    let plan = ctx.plan_summary();
-    let plan_lines = if format!(" {plan}").chars().count() > area.width as usize {
+    // `pahiri edit`: one line with the folder, nothing about a task.
+    let summary = if code_mode {
+        String::new()
+    } else {
+        ctx.attachment_summary()
+    };
+    let plan = if code_mode {
+        String::new()
+    } else {
+        ctx.plan_summary()
+    };
+    let plan_lines = if code_mode {
+        0
+    } else if format!(" {plan}").chars().count() > area.width as usize {
         2
     } else {
         1
@@ -37,7 +49,11 @@ pub fn draw_sidebar(frame: &mut Frame<'_>, app: &mut App, area: Rect, theme: &Th
     ])
     .areas(area);
 
-    let title = format!(" ◀ {} ", ctx.id);
+    let title = if code_mode {
+        format!(" {} ", ctx.dir.display())
+    } else {
+        format!(" ◀ {} ", ctx.id)
+    };
     let mut header_lines = vec![Line::styled(
         shorten(&title, area.width as usize),
         Style::new().fg(theme.header).add_modifier(Modifier::BOLD),

@@ -190,6 +190,8 @@ pub struct App {
     search: Option<search::SearchPanel>,
     /// Word completion list (Ctrl+Space).
     completion: Option<complete::Completion>,
+    /// `pahiri edit`: only the code editor (no tasks, timer or hooks).
+    code_mode: bool,
 }
 
 impl App {
@@ -272,6 +274,7 @@ impl App {
             file_index: finder::FileIndex::default(),
             search: None,
             completion: None,
+            code_mode: false,
         };
         app.config_mtime = app.config_file_mtime();
         if matches!(app.mode, Mode::Home) {
@@ -288,6 +291,71 @@ impl App {
             app.check_day();
         }
         app
+    }
+
+    /// `pahiri edit [PATH…]`: the code editor alone over `paths` (folders
+    /// become the file tree's roots, files are opened; none: the current
+    /// folder). No tasks, timer, hooks or session; `config` only styles it.
+    pub fn new_editor(
+        mut config: Config,
+        config_path: PathBuf,
+        state_dir: PathBuf,
+        events: EventSender,
+        paths: &[PathBuf],
+    ) -> anyhow::Result<Self> {
+        // Shells end with the editor.
+        config.shell.tmux = false;
+        // Without a config `new` opens nothing (no store, session or hooks).
+        let mut app = Self::new(None, config_path, state_dir, events);
+        app.config = config;
+        app.leader = app.config.leader();
+        app.leader_table = keymap::leader_table(&app.config.keys);
+        app.code_mode = true;
+        app.store = None;
+        app.timer = None;
+        app.popup = None;
+        app.status = None;
+        let cwd = std::env::current_dir()?;
+        let abs: Vec<PathBuf> = paths
+            .iter()
+            .map(|p| {
+                let p = Config::expand_tilde(&p.display().to_string());
+                let p = if p.is_absolute() { p } else { cwd.join(p) };
+                p.canonicalize().unwrap_or(p)
+            })
+            .collect();
+        let mut roots: Vec<PathBuf> = abs.iter().filter(|p| p.is_dir()).cloned().collect();
+        let files: Vec<PathBuf> = abs.iter().filter(|p| !p.is_dir()).cloned().collect();
+        if roots.is_empty() {
+            roots.push(
+                files
+                    .first()
+                    .and_then(|f| f.parent())
+                    .map_or(cwd, Path::to_path_buf),
+            );
+        }
+        let ctx = TaskContext::standalone(&roots, app.config.show_hidden)?;
+        let id = ctx.id.clone();
+        app.contexts.insert(id.clone(), ctx);
+        app.active_task = Some(id);
+        app.mode = Mode::Task;
+        for f in &files {
+            if f.exists() {
+                app.request_open_file(f);
+            } else {
+                app.popup = Some(Popup::confirm(
+                    "New file",
+                    format!("{} does not exist. Create it?", f.display()),
+                    Pending::CreatePath(f.clone()),
+                ));
+            }
+        }
+        Ok(app)
+    }
+
+    /// Whether this is `pahiri edit` (the code editor alone).
+    pub fn is_code_mode(&self) -> bool {
+        self.code_mode
     }
 
     /// Task list filter text and whether it is being typed.
@@ -707,7 +775,15 @@ impl App {
     }
 
     /// Switch to `candidate` (saved on the Settings view or reloaded from disk).
-    fn apply_config(&mut self, candidate: Config) {
+    fn apply_config(&mut self, mut candidate: Config) {
+        if self.code_mode {
+            // Only looks and keys: there are no tasks to reopen.
+            candidate.shell.tmux = false;
+            self.config = candidate;
+            self.leader = self.config.leader();
+            self.leader_table = keymap::leader_table(&self.config.keys);
+            return;
+        }
         let reopen = candidate.categories != self.config.categories
             || candidate.tasks_dir != self.config.tasks_dir
             || candidate.status_file != self.config.status_file
@@ -1312,6 +1388,10 @@ impl App {
     }
 
     fn back_to_list(&mut self) {
+        if self.code_mode {
+            self.request_quit();
+            return;
+        }
         let was_in_task = matches!(self.mode, Mode::Task);
         self.mode = Mode::Home;
         if let Some(id) = self.active_task.clone() {
@@ -1369,6 +1449,7 @@ impl App {
     fn open_palette(&mut self) {
         let commands = keymap::apply_palette_overrides(
             match self.mode {
+                Mode::Task if self.code_mode => palette::code_commands(),
                 Mode::Task => palette::task_commands(),
                 _ => palette::list_commands(),
             },
@@ -1378,6 +1459,10 @@ impl App {
     }
 
     fn run_action(&mut self, action: Action) {
+        if self.code_mode && !action.in_editor() {
+            self.set_status("not in pahiri edit (it is the code editor alone)");
+            return;
+        }
         match action {
             Action::TaskList => self.back_to_list(),
             Action::PlanDay => {
@@ -1836,6 +1921,10 @@ impl App {
 
     fn handle_task_key(&mut self, key: KeyEvent) {
         let Some(focus) = self.active_context().map(|c| c.focus) else {
+            if self.code_mode {
+                self.should_quit = true;
+                return;
+            }
             self.mode = Mode::Home;
             return;
         };

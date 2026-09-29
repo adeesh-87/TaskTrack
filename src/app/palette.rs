@@ -176,6 +176,28 @@ impl Action {
         }
     }
 
+    /// Whether the action works in `pahiri edit` (no tasks).
+    pub fn in_editor(self) -> bool {
+        matches!(
+            self,
+            Self::Find
+                | Self::SearchFiles
+                | Self::NewShell
+                | Self::CloseShell
+                | Self::FocusFiles
+                | Self::FocusEditor
+                | Self::FocusShells
+                | Self::FocusTerminal
+                | Self::Zoom
+                | Self::ToggleHidden
+                | Self::Save
+                | Self::CloseEditor
+                | Self::Help
+                | Self::Quit
+                | Self::Refresh
+        )
+    }
+
     /// Look up by name.
     pub fn from_name(name: &str) -> Option<Self> {
         Self::ALL.into_iter().find(|a| a.name() == name)
@@ -314,6 +336,18 @@ pub fn task_commands() -> Vec<Command> {
         cmd('h', "help page (F1)", Action::Help),
         cmd('q', "quit pahiri", Action::Quit),
     ]
+}
+
+/// Commands of `pahiri edit` (the task view's, minus everything about tasks).
+pub fn code_commands() -> Vec<Command> {
+    task_commands()
+        .into_iter()
+        .filter(|c| c.action.in_editor())
+        .map(|c| match c.action {
+            Action::Quit => cmd(c.key, "quit", Action::Quit),
+            _ => c,
+        })
+        .collect()
 }
 
 /// Palette state.

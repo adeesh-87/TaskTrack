@@ -347,6 +347,10 @@ impl App {
             return Vec::new();
         };
         let mut roots = vec![(String::new(), ctx.tree.root().to_path_buf())];
+        if let Some(fixed) = &ctx.fixed_roots {
+            roots.extend(fixed.iter().cloned());
+            return roots;
+        }
         roots.extend(
             ctx.meta
                 .workspaces
