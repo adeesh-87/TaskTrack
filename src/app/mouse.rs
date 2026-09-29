@@ -374,6 +374,11 @@ impl App {
                     _ => {}
                 }
                 ctx.set_focus(Focus::Editor);
+                // Clicking the text takes the keys from the find bar.
+                if let Some(find) = &mut self.find {
+                    find.focused = false;
+                }
+                self.completion = None;
             }
             MouseEventKind::Drag(MouseButton::Left) => {
                 let (row, col) = position(ed);

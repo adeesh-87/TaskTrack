@@ -4,6 +4,7 @@ mod audit_view;
 mod config_page;
 mod plan_view;
 mod popup;
+mod search_view;
 mod task_card;
 mod task_list;
 mod task_view;
@@ -22,6 +23,8 @@ pub use theme::Theme;
 
 /// Width of the left column as a percentage of the screen.
 pub const SIDEBAR_PERCENT: u16 = 20;
+/// Width of the task view's sidebar while the file tree has the focus.
+pub const SIDEBAR_WIDE_PERCENT: u16 = 35;
 /// Width of Home's board: wide enough for task titles.
 pub const BOARD_PERCENT: u16 = 32;
 
@@ -67,7 +70,9 @@ pub fn draw(frame: &mut Frame<'_>, app: &mut App) {
             if zoomed {
                 task_view::draw_terminal(frame, app, main, &theme, true);
             } else {
-                let [left, right] = split_columns(main);
+                // Browsing files gets room for deep paths; editing gets it back.
+                let wide = app.active_context().is_some_and(|c| c.focus == Focus::Tree);
+                let [left, right] = split_columns(main, wide);
                 task_view::draw_sidebar(frame, app, left, &theme);
                 task_view::draw_workspace(frame, app, right, &theme);
             }
@@ -76,7 +81,9 @@ pub fn draw(frame: &mut Frame<'_>, app: &mut App) {
 
     draw_status_bar(frame, app, bar, &theme);
 
-    if let Some(p) = app.popup() {
+    if matches!(app.popup(), Some(crate::app::Popup::Search)) {
+        search_view::draw(frame, app, main, &theme);
+    } else if let Some(p) = app.popup() {
         popup::draw(frame, p, main, &theme);
     }
 
@@ -94,12 +101,23 @@ pub fn draw(frame: &mut Frame<'_>, app: &mut App) {
     }
 }
 
-fn split_columns(area: Rect) -> [Rect; 2] {
-    Layout::horizontal([Constraint::Percentage(SIDEBAR_PERCENT), Constraint::Min(10)]).areas(area)
+fn split_columns(area: Rect, wide: bool) -> [Rect; 2] {
+    let percent = if wide {
+        SIDEBAR_WIDE_PERCENT
+    } else {
+        SIDEBAR_PERCENT
+    };
+    Layout::horizontal([Constraint::Percentage(percent), Constraint::Min(10)]).areas(area)
 }
 
 /// The timer chip: text and style (always shown; click it or Esc m).
 fn timer_chip(app: &App, theme: &Theme) -> (String, Style) {
+    if app.is_code_mode() {
+        return (
+            " pahiri edit ".to_owned(),
+            Style::new().fg(theme.muted).bg(theme.bar_bg),
+        );
+    }
     let Some(t) = app.timer() else {
         return (
             " ⏱ timer · Esc m ".to_owned(),

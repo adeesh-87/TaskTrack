@@ -21,7 +21,11 @@ Each recipe lists every place to touch. Run fmt, clippy and tests after.
 - Task panes: `handle_tree_key` / `handle_editor_key` / `handle_shell_list_key`.
   Editor movement keys go through `move_in_editor` (Shift selects); editing
   operations belong on `Buffer` (`src/editor/mod.rs`) with a unit test there.
-- After the leader key (any task pane): add a `LeaderCmd` in `src/app/keymap.rs`
+- Editor / file-tree keys that act on files (Ctrl+B, Ctrl+Tab, Ctrl+P, …):
+  `handle_workspace_key`; they run before the leader there. Keys of the find
+  bar and the completion list: `handle_find_key` (`find.rs`),
+  `handle_completion_key` (`complete.rs`).
+- After the leader key (terminal and shell list): add a `LeaderCmd` in `src/app/keymap.rs`
   (name, default key, description) and handle it in `handle_leader_command`.
 Prefer calling `self.run_action(Action::X)` so keys and palette stay in sync.
 

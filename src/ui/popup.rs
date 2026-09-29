@@ -135,6 +135,7 @@ pub fn draw(frame: &mut Frame<'_>, popup: &Popup, area: Rect, theme: &Theme) {
             | Popup::Tickets { .. }
             | Popup::MultiSelect { .. }
             | Popup::Palette(_)
+            | Popup::Finder(_)
             | Popup::Choose { .. }
             | Popup::Doc { .. }
             | Popup::Checkpoints { .. }
@@ -328,6 +329,40 @@ pub fn draw(frame: &mut Frame<'_>, popup: &Popup, area: Rect, theme: &Theme) {
                 "Space tick/untick · Enter start the timer on it · Esc close · edit freely in CONTEXT.md",
                 theme,
             ));
+            lines
+        }
+        // Drawn by `search_view` (it needs the app's search state).
+        Popup::Search => return,
+        Popup::Finder(f) => {
+            title = format!(" {} ", f.title());
+            cursor = Some((2 + f.query.chars().count() as u16, 0));
+            let mark = Style::new().fg(theme.accent).add_modifier(Modifier::BOLD);
+            let rows = f.items.iter().enumerate().map(|(i, item)| {
+                let base = match (i == f.selected, item.dir) {
+                    (true, _) => sel,
+                    (false, true) => Style::new().fg(theme.header),
+                    (false, false) => Style::new(),
+                };
+                let mut spans = vec![Span::styled(" ", base)];
+                spans.extend(item.label.chars().enumerate().map(|(n, c)| {
+                    let style = if item.marks.contains(&n) {
+                        base.patch(mark)
+                    } else {
+                        base
+                    };
+                    Span::styled(c.to_string(), style)
+                }));
+                Line::from(spans)
+            });
+            let (list, _) = list_lines(rows, f.selected, max_list.saturating_sub(3).max(3));
+            let mut lines = vec![Line::from(vec![
+                Span::styled("> ", Style::new().fg(theme.accent)),
+                Span::raw(f.query.clone()),
+            ])];
+            lines.extend(list);
+            lines.push(Line::raw(""));
+            lines.push(hint(&format!(" {}", f.note), theme));
+            lines.push(hint(f.hint(), theme));
             lines
         }
         Popup::Palette(p) => {

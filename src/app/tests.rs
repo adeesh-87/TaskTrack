@@ -100,6 +100,31 @@ impl Harness {
         Self::build(with_config, |_| {})
     }
 
+    /// `pahiri edit` over folders / files made by `setup` in a temp folder
+    /// (given as paths relative to it).
+    fn editor(setup: impl FnOnce(&Path), paths: &[&str]) -> Self {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path().to_path_buf();
+        setup(&root);
+        let (tx, rx) = EventSender::channel();
+        let paths: Vec<std::path::PathBuf> = paths.iter().map(|p| root.join(p)).collect();
+        let app = App::new_editor(
+            Config::default(),
+            root.join("config.toml"),
+            root.join("state"),
+            tx,
+            &paths,
+        )
+        .unwrap();
+        Self {
+            app,
+            rx,
+            _dir: dir,
+            tasks: root.join("no-tasks"),
+            root,
+        }
+    }
+
     fn press(&mut self, k: KeyEvent) {
         self.app.handle(AppEvent::Input(Event::Key(k)));
     }
@@ -112,6 +137,10 @@ impl Harness {
 
     fn ctx(&self) -> &TaskContext {
         self.app.active_context().expect("active task")
+    }
+
+    fn ctx_mut(&mut self) -> &mut TaskContext {
+        self.app.active_context_mut().expect("active task")
     }
 
     fn context_md(&self, id: &str) -> String {
@@ -463,11 +492,19 @@ fn pane_cycling_and_shell_selection_keys() {
     let mut h = Harness::new(true);
     h.press(key(KeyCode::Enter));
     assert_eq!(h.ctx().focus, Focus::Tree);
-    h.press(KeyEvent::new(KeyCode::Tab, KeyModifiers::CONTROL));
+    // From the files and the editor, Alt+] / Alt+[ (and Tab from the files)
+    // move between panes; Ctrl+Tab there switches open files instead.
+    h.press(alt(']'));
     assert_eq!(h.ctx().focus, Focus::Shells);
     h.press(KeyEvent::new(KeyCode::Tab, KeyModifiers::CONTROL));
     assert_eq!(h.ctx().focus, Focus::Tree); // no editor, no shells yet
-    h.press(alt(']'));
+    h.press(KeyEvent::new(KeyCode::Tab, KeyModifiers::CONTROL));
+    assert_eq!(
+        h.ctx().focus,
+        Focus::Tree,
+        "Ctrl+Tab in the files: no other open file"
+    );
+    h.press(key(KeyCode::Tab));
     assert_eq!(h.ctx().focus, Focus::Shells);
     h.press(KeyEvent::new(
         KeyCode::BackTab,
@@ -1086,8 +1123,10 @@ fn coding_agent_starts_in_a_new_shell() {
         cfg.coding_agent.args = vec!["'agent:%s\\n'".into()];
         cfg.coding_agent.start_in_code = false;
     });
-    // Leader works from the files pane too: leader a.
+    // Leader works from the shell list (in the files pane Ctrl+B is the
+    // editor's files toggle): leader a.
     h.press(key(KeyCode::Enter));
+    h.press(key(KeyCode::Char('s')));
     h.press(ctrl('b'));
     h.press(key(KeyCode::Char('a')));
     assert_eq!(h.ctx().shells.len(), 1);
@@ -1335,6 +1374,7 @@ fn key_overrides_change_palette_and_leader() {
     h.press(key(KeyCode::Esc));
     h.press(key(KeyCode::Enter));
     assert!(h.pump_until(|app| matches!(app.mode(), Mode::Task)));
+    h.press(key(KeyCode::Char('s')));
     h.press(ctrl('b'));
     h.press(KeyEvent::new(KeyCode::Char('H'), KeyModifiers::SHIFT));
     assert!(matches!(h.app.popup(), Some(Popup::Help { .. })));
@@ -1402,6 +1442,7 @@ fn tmux_backed_shells_survive_pahiri() {
             .is_some_and(|s| !s.session.screen().contents().trim().is_empty())
     }));
     // Closing the shell in pahiri ends the session.
+    h.press(key(KeyCode::Char('s')));
     h.press(ctrl('b'));
     h.press(key(KeyCode::Char('x')));
     assert!(matches!(h.app.popup(), Some(Popup::Confirm { .. })));
@@ -2252,4 +2293,563 @@ fn new_task_from_a_source_file() {
     };
     assert_eq!(tickets[0].title, "From the file");
     assert!(h.app.status().unwrap_or_default().contains("jira.json"));
+}
+
+#[test]
+fn open_files_stack_ctrl_tab_ctrl_e_and_ctrl_b() {
+    let mut h = Harness::new(true);
+    fs::write(h.tasks.join("alpha/notes.txt"), "notes\n").unwrap();
+    h.press(key(KeyCode::Enter));
+    h.press(key(KeyCode::Esc));
+    h.press(key(KeyCode::Char('o'))); // CONTEXT.md
+    h.type_str("X");
+    // Ctrl+B: to the files, pick notes.txt, Enter opens it; CONTEXT.md stays open.
+    h.press(ctrl('b'));
+    assert_eq!(h.ctx().focus, Focus::Tree);
+    assert!(
+        h.ctx()
+            .tree
+            .selected()
+            .unwrap()
+            .path
+            .ends_with("CONTEXT.md"),
+        "files follow the editor"
+    );
+    let notes = h
+        .ctx()
+        .tree
+        .nodes()
+        .iter()
+        .position(|n| n.name == "notes.txt")
+        .unwrap();
+    h.ctx_mut().tree.select_index(notes);
+    h.press(key(KeyCode::Enter));
+    assert!(h
+        .ctx()
+        .editor
+        .as_ref()
+        .unwrap()
+        .path()
+        .ends_with("notes.txt"));
+    assert_eq!(h.ctx().recent.len(), 1);
+    assert!(h.ctx().recent[0].is_dirty(), "unsaved edits stay in memory");
+    // Ctrl+Tab goes back; twice in a row goes deeper; any key ends the round.
+    let ctrl_tab = KeyEvent::new(KeyCode::Tab, KeyModifiers::CONTROL);
+    h.press(ctrl_tab);
+    assert!(h
+        .ctx()
+        .editor
+        .as_ref()
+        .unwrap()
+        .path()
+        .ends_with("CONTEXT.md"));
+    assert!(h.ctx().editor.as_ref().unwrap().text().starts_with('X'));
+    h.press(key(KeyCode::Right)); // ends the cycle: CONTEXT.md is now the most recent
+    h.press(ctrl_tab);
+    assert!(h
+        .ctx()
+        .editor
+        .as_ref()
+        .unwrap()
+        .path()
+        .ends_with("notes.txt"));
+    h.press(ctrl_tab);
+    h.press(ctrl_tab);
+    assert!(
+        h.ctx()
+            .editor
+            .as_ref()
+            .unwrap()
+            .path()
+            .ends_with("notes.txt"),
+        "wraps around"
+    );
+    h.press(KeyEvent::new(
+        KeyCode::BackTab,
+        KeyModifiers::CONTROL | KeyModifiers::SHIFT,
+    ));
+    assert!(h
+        .ctx()
+        .editor
+        .as_ref()
+        .unwrap()
+        .path()
+        .ends_with("CONTEXT.md"));
+    // Ctrl+E lists them, unsaved marked.
+    h.press(ctrl('e'));
+    let Some(Popup::Choose { choices, .. }) = h.app.popup() else {
+        panic!("{:?}", h.app.popup())
+    };
+    let labels: Vec<&str> = choices.iter().map(|c| c.label.as_str()).collect();
+    assert_eq!(labels, ["● CONTEXT.md", "  notes.txt"]);
+    h.press(key(KeyCode::Down));
+    h.press(key(KeyCode::Enter));
+    assert!(h
+        .ctx()
+        .editor
+        .as_ref()
+        .unwrap()
+        .path()
+        .ends_with("notes.txt"));
+    // Closing shows the previous file; quitting warns about the unsaved one.
+    h.press(ctrl('w'));
+    assert!(h
+        .ctx()
+        .editor
+        .as_ref()
+        .unwrap()
+        .path()
+        .ends_with("CONTEXT.md"));
+    h.press(key(KeyCode::Esc));
+    h.press(key(KeyCode::Char('q')));
+    assert!(popup_title(&h.app).contains("Quit"));
+}
+
+#[test]
+fn attached_workspaces_show_in_the_file_tree() {
+    let code = tempfile::tempdir().unwrap();
+    fs::write(code.path().join("main.c"), "int main(void) { return 0; }\n").unwrap();
+    let dir = code.path().to_path_buf();
+    let mut h = Harness::build(true, move |cfg| {
+        cfg.workspaces = vec![Workspace {
+            name: "fw".into(),
+            path: dir.clone(),
+            main_branch: None,
+        }];
+        crate::tasks::context::update_meta(&cfg.tasks_dir.join("alpha/CONTEXT.md"), "alpha", |m| {
+            m.workspaces = vec!["fw".into()];
+        })
+        .unwrap();
+    });
+    h.press(key(KeyCode::Enter));
+    let root = h
+        .ctx()
+        .tree
+        .nodes()
+        .iter()
+        .position(|n| n.name == "fw · code")
+        .unwrap();
+    h.ctx_mut().tree.select_index(root);
+    h.press(key(KeyCode::Char('+')));
+    h.press(key(KeyCode::Down));
+    h.press(key(KeyCode::Enter));
+    assert_eq!(
+        h.ctx().editor.as_ref().unwrap().path(),
+        code.path().join("main.c")
+    );
+    // Renaming the workspace itself is refused.
+    h.press(ctrl('b'));
+    h.press(key(KeyCode::Char('-')));
+    h.press(key(KeyCode::Char('-')));
+    assert!(h.ctx().tree.selected().unwrap().root);
+    h.press(key(KeyCode::Char('r')));
+    assert!(h.app.popup().is_none());
+}
+
+#[test]
+fn code_editing_keys_and_outside_changes() {
+    let mut h = Harness::new(true);
+    let file = h.tasks.join("alpha/scripts/run.sh");
+    fs::write(&file, "main() {\n\techo hi\n}\n").unwrap();
+    h.press(key(KeyCode::Enter));
+    h.app.request_open_file(&file);
+    assert_eq!(h.ctx().focus, Focus::Editor);
+    // Tab indents with the file's tabs; Enter keeps the indentation.
+    h.press(ctrl('g'));
+    h.type_str("2:7");
+    h.press(key(KeyCode::Enter));
+    assert_eq!(h.ctx().editor.as_ref().unwrap().cursor(), (1, 6));
+    h.press(key(KeyCode::End));
+    h.press(key(KeyCode::Enter));
+    h.type_str("x");
+    assert_eq!(h.ctx().editor.as_ref().unwrap().lines()[2], "\tx");
+    h.press(key(KeyCode::Tab));
+    assert_eq!(h.ctx().editor.as_ref().unwrap().lines()[2], "\tx\t");
+    h.press(KeyEvent::new(KeyCode::BackTab, KeyModifiers::SHIFT));
+    assert_eq!(h.ctx().editor.as_ref().unwrap().lines()[2], "x\t");
+    assert_eq!(h.ctx().focus, Focus::Editor, "Tab stays in the editor");
+    h.press(ctrl('s'));
+    // A clean file that changes on disk is reloaded.
+    fs::write(&file, "fresh\n").unwrap();
+    let f = fs::File::options().write(true).open(&file).unwrap();
+    f.set_modified(std::time::SystemTime::now() + Duration::from_secs(5))
+        .unwrap();
+    h.watch();
+    assert_eq!(h.ctx().editor.as_ref().unwrap().text(), "fresh\n");
+    assert!(h
+        .app
+        .status()
+        .unwrap_or_default()
+        .contains("reloaded run.sh"));
+}
+
+/// Draw the app into a `w`×`h` screen and return its text, one line per row.
+fn screen(app: &mut App, w: u16, h: u16) -> Vec<String> {
+    let mut term = ratatui::Terminal::new(ratatui::backend::TestBackend::new(w, h)).unwrap();
+    term.draw(|f| crate::ui::draw(f, app)).unwrap();
+    let buf = term.backend().buffer().clone();
+    (0..h)
+        .map(|y| (0..w).map(|x| buf[(x, y)].symbol()).collect::<String>())
+        .collect()
+}
+
+#[test]
+fn find_bar_searches_steps_and_replaces() {
+    let mut h = Harness::new(true);
+    let file = h.tasks.join("alpha/scripts/run.c");
+    fs::write(&file, "int foo = 1;\nfoo(foo_bar);\nFOO\n").unwrap();
+    h.press(key(KeyCode::Enter));
+    h.app.request_open_file(&file);
+    let ed = |h: &Harness| h.ctx().editor.as_ref().unwrap().clone();
+    // Typing searches from the cursor; Enter / Shift+Enter step, wrapping.
+    h.press(ctrl('f'));
+    h.type_str("foo");
+    assert_eq!(ed(&h).selection(), Some(((0, 4), (0, 7))));
+    h.press(key(KeyCode::Enter));
+    assert_eq!(ed(&h).selection(), Some(((1, 0), (1, 3))));
+    h.press(KeyEvent::new(KeyCode::Enter, KeyModifiers::SHIFT));
+    h.press(KeyEvent::new(KeyCode::Enter, KeyModifiers::SHIFT));
+    assert_eq!(
+        ed(&h).selection(),
+        Some(((2, 0), (2, 3))),
+        "wraps to the end"
+    );
+    let rows = screen(&mut h.app, 100, 30);
+    assert!(rows
+        .iter()
+        .any(|r| r.contains(" find foo") && r.contains("4/4")));
+    // Match case and whole word narrow it down; F3 works from the editor.
+    h.press(alt('c'));
+    h.press(alt('w'));
+    assert_eq!(h.app.find_bar().unwrap().error, None);
+    h.press(key(KeyCode::Esc));
+    assert!(!h.app.find_bar().unwrap().open);
+    h.press(key(KeyCode::F(3)));
+    assert_eq!(
+        ed(&h).selection(),
+        Some(((1, 0), (1, 3))),
+        "FOO and foo_bar skipped"
+    );
+    // Regex with groups; replace one, then all as one undo step.
+    h.press(ctrl('r'));
+    assert_eq!(h.app.find_bar().unwrap().field, find::FindField::Replace);
+    h.press(key(KeyCode::Tab));
+    h.press(alt('r'));
+    h.press(alt('w'));
+    h.type_str(r"(\w+)_bar");
+    h.press(key(KeyCode::Tab));
+    h.app.handle_paste("x_$1\nignored");
+    h.press(key(KeyCode::Enter));
+    assert_eq!(ed(&h).lines()[1], "foo(x_foo);");
+    h.press(key(KeyCode::Tab));
+    h.press(ctrl('h'));
+    assert_eq!(
+        h.app.find_bar().unwrap().query,
+        r"(\w+)",
+        "Ctrl+Backspace: a word"
+    );
+    h.press(key(KeyCode::Tab));
+    h.press(alt('a'));
+    assert_eq!(ed(&h).lines()[0], "x_int x_foo = x_1;");
+    h.press(ctrl('z'));
+    assert_eq!(ed(&h).lines()[0], "int foo = 1;", "one undo step");
+    // A bad pattern shows the error and matches nothing.
+    h.press(ctrl('f'));
+    h.type_str("(");
+    assert!(h.app.find_bar().unwrap().error.is_some());
+    // Ctrl keys still reach the editor (Ctrl+S saves) with the bar open.
+    h.press(ctrl('s'));
+    assert!(!ed(&h).is_dirty());
+    assert!(h.app.find_bar().unwrap().open);
+}
+
+fn finder(h: &Harness) -> &finder::Finder {
+    match h.app.popup() {
+        Some(Popup::Finder(f)) => f,
+        other => panic!("no finder: {other:?}"),
+    }
+}
+
+#[test]
+fn quick_open_and_path_opener() {
+    let code = tempfile::tempdir().unwrap();
+    fs::create_dir_all(code.path().join("src/net")).unwrap();
+    fs::write(code.path().join("src/net/socket.c"), "a\nb\nc\nd\n").unwrap();
+    fs::write(code.path().join("src/main.c"), "int main;\n").unwrap();
+    let dir = code.path().to_path_buf();
+    let mut h = Harness::build(true, move |cfg| {
+        cfg.workspaces = vec![Workspace {
+            name: "fw".into(),
+            path: dir.clone(),
+            main_branch: None,
+        }];
+        crate::tasks::context::update_meta(&cfg.tasks_dir.join("alpha/CONTEXT.md"), "alpha", |m| {
+            m.workspaces = vec!["fw".into()];
+        })
+        .unwrap();
+    });
+    h.press(key(KeyCode::Enter));
+    h.press(key(KeyCode::Char('f')));
+    // Ctrl+P: recent files until 2 characters, then the index (built in the
+    // background) over the task folder and the code workspaces.
+    h.press(ctrl('p'));
+    assert!(finder(&h).note.starts_with("recent files"));
+    assert!(h.pump_until(|app| !app.file_index.building));
+    h.type_str("s");
+    assert!(
+        finder(&h).note.starts_with("recent files"),
+        "1 char: no search"
+    );
+    h.type_str("ock:3");
+    assert_eq!(finder(&h).items[0].label, "fw/src/net/socket.c");
+    h.press(key(KeyCode::Enter));
+    let ed = h.ctx().editor.as_ref().unwrap();
+    assert_eq!(ed.path(), code.path().join("src/net/socket.c"));
+    assert_eq!(ed.cursor(), (2, 0), "name:line jumps to the line");
+    // Regex mode; Esc closes.
+    h.press(ctrl('p'));
+    h.type_str(r"ma[i]n\.c$");
+    assert!(finder(&h).note.starts_with("regex · 1 of"));
+    h.press(key(KeyCode::Esc));
+    assert!(h.app.popup().is_none());
+    // Ctrl+O starts in the open file's folder; Tab takes an entry, typing
+    // goes on, Enter on a file opens it.
+    h.press(ctrl('o'));
+    assert!(finder(&h).query.ends_with("src/net/"));
+    h.press(KeyEvent::new(KeyCode::Backspace, KeyModifiers::CONTROL));
+    assert!(finder(&h).query.ends_with("src/"));
+    h.type_str("ma");
+    assert_eq!(finder(&h).items[0].label, "main.c");
+    h.press(key(KeyCode::Tab));
+    assert!(finder(&h).query.ends_with("src/main.c"));
+    h.press(key(KeyCode::Enter));
+    assert_eq!(
+        h.ctx().editor.as_ref().unwrap().path(),
+        code.path().join("src/main.c")
+    );
+    // Ctrl+Enter opens what is typed: a new file after asking.
+    h.press(ctrl('o'));
+    h.type_str("new/x.h");
+    h.press(KeyEvent::new(KeyCode::Enter, KeyModifiers::CONTROL));
+    assert_eq!(h.app.popup().unwrap().title(), "New file");
+    h.press(key(KeyCode::Char('y')));
+    let made = code.path().join("src/new/x.h");
+    assert!(made.is_file());
+    assert_eq!(h.ctx().editor.as_ref().unwrap().path(), made);
+    // … a folder shows in the file tree.
+    h.press(ctrl('o'));
+    h.press(KeyEvent::new(KeyCode::Backspace, KeyModifiers::CONTROL));
+    h.press(KeyEvent::new(KeyCode::Enter, KeyModifiers::ALT));
+    assert_eq!(h.ctx().focus, Focus::Tree);
+    assert_eq!(
+        h.ctx().tree.selected().unwrap().path,
+        code.path().join("src")
+    );
+}
+
+#[test]
+fn search_in_files_opens_results_and_f4_steps() {
+    let code = tempfile::tempdir().unwrap();
+    fs::create_dir_all(code.path().join("src")).unwrap();
+    fs::write(code.path().join("src/a.c"), "int x;\nfoo(x);\n  foo();\n").unwrap();
+    fs::write(code.path().join("src/b.h"), "void foo(void);\n").unwrap();
+    let dir = code.path().to_path_buf();
+    let mut h = Harness::build(true, move |cfg| {
+        cfg.workspaces = vec![Workspace {
+            name: "fw".into(),
+            path: dir.clone(),
+            main_branch: None,
+        }];
+        crate::tasks::context::update_meta(&cfg.tasks_dir.join("alpha/CONTEXT.md"), "alpha", |m| {
+            m.workspaces = vec!["fw".into()];
+        })
+        .unwrap();
+    });
+    fs::write(h.tasks.join("alpha/notes.md"), "foo in the notes\n").unwrap();
+    h.press(key(KeyCode::Enter));
+    h.press(key(KeyCode::Char('f')));
+    let ctrl_shift = |c| {
+        KeyEvent::new(
+            KeyCode::Char(c),
+            KeyModifiers::CONTROL | KeyModifiers::SHIFT,
+        )
+    };
+    h.press(ctrl_shift('F'));
+    assert!(matches!(h.app.popup(), Some(Popup::Search)));
+    h.type_str("foo");
+    h.press(key(KeyCode::Enter));
+    assert!(h.pump_until(|app| !app.search.as_ref().unwrap().running));
+    let labels = |h: &Harness| -> Vec<(String, usize)> {
+        let p = h.app.search.as_ref().unwrap();
+        p.files
+            .iter()
+            .map(|f| (f.label.clone(), f.hits.len()))
+            .collect()
+    };
+    assert_eq!(
+        labels(&h),
+        [
+            ("fw/src/a.c".to_owned(), 2),
+            ("fw/src/b.h".to_owned(), 1),
+            ("notes.md".to_owned(), 1)
+        ]
+    );
+    // Enter moved to the results; only *.c and *.h files, not the task folder.
+    assert_eq!(h.app.search.as_ref().unwrap().field, search::Field::Results);
+    h.press(key(KeyCode::Tab));
+    h.press(key(KeyCode::Tab));
+    h.type_str("*.c, *.h");
+    h.press(key(KeyCode::Tab));
+    h.press(key(KeyCode::Tab));
+    assert_eq!(h.app.search.as_ref().unwrap().field, search::Field::Roots);
+    h.press(key(KeyCode::Char(' ')));
+    assert!(!h.app.search.as_ref().unwrap().roots[0].on);
+    h.press(key(KeyCode::Enter));
+    assert!(h.pump_until(|app| !app.search.as_ref().unwrap().running));
+    assert_eq!(labels(&h).len(), 2);
+    let rows = screen(&mut h.app, 100, 30);
+    assert!(
+        rows.iter().any(|r| r.contains("fw/src/a.c (2)")),
+        "{rows:#?}"
+    );
+    // Enter on the second match opens its file with the match selected.
+    h.press(key(KeyCode::Down));
+    h.press(key(KeyCode::Down));
+    h.press(key(KeyCode::Enter));
+    assert!(h.app.popup().is_none());
+    let ed = h.ctx().editor.as_ref().unwrap();
+    assert!(ed.path().ends_with("src/a.c"));
+    assert_eq!(ed.selection(), Some(((2, 2), (2, 5))));
+    // F4 / Shift+F4 step through the results, across files and wrapping.
+    h.press(key(KeyCode::F(4)));
+    assert!(h.ctx().editor.as_ref().unwrap().path().ends_with("src/b.h"));
+    h.press(key(KeyCode::F(4)));
+    assert_eq!(
+        h.ctx().editor.as_ref().unwrap().selection(),
+        Some(((1, 0), (1, 3)))
+    );
+    h.press(KeyEvent::new(KeyCode::F(4), KeyModifiers::SHIFT));
+    assert!(h.ctx().editor.as_ref().unwrap().path().ends_with("src/b.h"));
+    // Ctrl+F in the file tree searches the selected folder only.
+    h.press(ctrl('b'));
+    h.press(ctrl('f'));
+    let p = h.app.search.as_ref().unwrap();
+    assert_eq!(p.scope.as_deref(), Some(code.path().join("src").as_path()));
+    assert_eq!(p.query, "foo", "the panel keeps its settings");
+    h.type_str("bar");
+    assert_eq!(
+        h.app.search.as_ref().unwrap().query,
+        "bar",
+        "typing replaces it"
+    );
+}
+
+#[test]
+fn ctrl_space_completes_words_from_open_files() {
+    let mut h = Harness::new(true);
+    let other = h.tasks.join("alpha/scripts/lib.sh");
+    let file = h.tasks.join("alpha/scripts/run.sh");
+    fs::write(&other, "deploy_firmware() { :; }\n").unwrap();
+    fs::write(&file, "deploy_image\n").unwrap();
+    h.press(key(KeyCode::Enter));
+    h.app.request_open_file(&other);
+    h.app.request_open_file(&file);
+    h.press(ctrl('g'));
+    h.type_str("2");
+    h.press(key(KeyCode::Enter));
+    h.type_str("dep");
+    let ctrl_space = KeyEvent::new(KeyCode::Char(' '), KeyModifiers::CONTROL);
+    h.press(ctrl_space);
+    assert_eq!(
+        h.app.completion().unwrap().items,
+        ["deploy_image", "deploy_firmware"],
+        "this file's words first"
+    );
+    // Typing narrows the list; one left still shows until accepted.
+    h.type_str("loy_f");
+    assert_eq!(h.app.completion().unwrap().items, ["deploy_firmware"]);
+    h.press(key(KeyCode::Tab));
+    assert!(h.app.completion().is_none());
+    assert_eq!(
+        h.ctx().editor.as_ref().unwrap().lines()[1],
+        "deploy_firmware"
+    );
+    // A single match is inserted at once; Esc closes the list.
+    h.press(key(KeyCode::Enter));
+    h.type_str("deploy_i");
+    h.press(ctrl_space);
+    assert_eq!(h.ctx().editor.as_ref().unwrap().lines()[2], "deploy_image");
+    h.press(key(KeyCode::Enter));
+    h.type_str("de");
+    h.press(ctrl_space);
+    let rows = screen(&mut h.app, 100, 30);
+    assert!(rows.iter().any(|r| r.contains(" deploy_firmware ")));
+    h.press(key(KeyCode::Esc));
+    assert!(h.app.completion().is_none());
+    assert!(h.app.popup().is_none(), "Esc only closed the list");
+}
+
+#[test]
+fn pahiri_edit_is_the_code_editor_alone() {
+    let mut h = Harness::editor(
+        |root| {
+            fs::create_dir_all(root.join("fw/src")).unwrap();
+            fs::write(root.join("fw/src/main.c"), "int main;\n").unwrap();
+            fs::create_dir_all(root.join("app")).unwrap();
+            fs::write(root.join("app/app.py"), "print(1)\n").unwrap();
+            fs::write(root.join("notes.txt"), "hi\n").unwrap();
+        },
+        &["fw", "app", "notes.txt"],
+    );
+    assert!(h.app.is_code_mode());
+    assert!(matches!(h.app.mode(), Mode::Task));
+    // The first folder is the tree's root, the others extra roots; the file is open.
+    assert_eq!(
+        h.ctx().tree.root(),
+        h.root.join("fw").canonicalize().unwrap()
+    );
+    let names: Vec<String> = h
+        .ctx()
+        .tree
+        .nodes()
+        .iter()
+        .map(|n| n.name.clone())
+        .collect();
+    assert_eq!(names, ["src", "app"]);
+    assert!(h
+        .ctx()
+        .editor
+        .as_ref()
+        .unwrap()
+        .path()
+        .ends_with("notes.txt"));
+    // Quick open searches every folder.
+    h.press(ctrl('p'));
+    assert!(h.pump_until(|app| !app.file_index.building));
+    h.type_str("app.py");
+    assert_eq!(finder(&h).items[0].label, "app/app.py");
+    h.press(key(KeyCode::Esc));
+    // The palette only has editor commands; task actions are refused.
+    h.press(key(KeyCode::Esc));
+    let Some(Popup::Palette(p)) = h.app.popup() else {
+        panic!("no palette");
+    };
+    assert!(p.matches().iter().all(|c| c.action.in_editor()));
+    assert!(p.matches().iter().any(|c| c.action == Action::SearchFiles));
+    h.press(key(KeyCode::Esc));
+    h.app.run_action(Action::Timer);
+    assert!(h.app.timer.is_none());
+    assert!(h
+        .app
+        .status()
+        .unwrap_or_default()
+        .contains("not in pahiri edit"));
+    // Nothing of pahiri's session is written; leaving means quitting.
+    h.app.save_session();
+    assert!(!h.root.join("state/session.json").exists());
+    let rows = screen(&mut h.app, 100, 30);
+    assert!(rows[29].contains("pahiri edit"));
+    h.press(key(KeyCode::Esc));
+    h.press(key(KeyCode::Char('q')));
+    assert!(h.app.should_quit());
 }

@@ -268,7 +268,7 @@ impl App {
                 );
                 let _ = writeln!(
                     out,
-                    "LEADER ({leader}, then …) — works in every task pane; set with leader.<name>"
+                    "LEADER ({leader}, then …) — in the terminal and shell list; set with leader.<name>"
                 );
                 for (cmd, _, what) in LeaderCmd::ALL {
                     let _ = writeln!(
@@ -290,11 +290,20 @@ impl App {
                      AUDIT (Esc U)\n  Space tick · Enter decide / rename · A all/none · a apply · Esc leave (F1 → Audit)\n\n\
                      PLAN\n  Space pick · s suggest · a add a free item · t add one for the task · Tab/←→ sides\n  \
                      J/K order · x remove · A all columns · Enter save · Esc cancel\n\n\
-                     PANES (task view)\n  Ctrl+Tab / Ctrl+Shift+Tab or Alt+] / Alt+[   next / previous pane\n  \
+                     PANES (task view)\n  Alt+] / Alt+[ (Ctrl+Tab / Ctrl+Shift+Tab outside editor and files)   next / previous pane\n  \
                      Ctrl+1..9 / Alt+1..9   select shell N\n\n\
-                     FILES\n  Enter open/toggle · ←/→ collapse/expand · a new file · A new folder · r rename\n  \
-                     d delete · . hidden · t shell · R refresh (the tree also refreshes by itself)\n\n\
-                     EDITOR\n  Ctrl+S save · Ctrl+W close · Ctrl+Z undo · Ctrl+Y redo · Ctrl+F find · F3/Ctrl+G next\n  \
+                     FILES (the task folder, then its attached workspaces and builds)\n  \
+                     Enter open/toggle · ←/→ or -/+ collapse/expand · a new file · A new folder · r rename\n  \
+                     d delete · . hidden · t shell · R refresh (the tree also refreshes by itself)\n  \
+                     Ctrl+B editor · Ctrl+F search in the selected folder\n\n\
+                     CODE\n  Ctrl+B editor ⇄ files · Ctrl+Tab / Ctrl+Shift+Tab recent files · Ctrl+E open files\n  \
+                     Ctrl+P quick open (2+ chars; fuzzy, regex with ( [ * + ? | \\ ; name:line)\n  \
+                     Ctrl+O open a path (Tab/Enter take the entry, Ctrl+Enter / Alt+Enter open what is typed)\n  \
+                     Ctrl+F find · Ctrl+R replace · Enter/Shift+Enter next/previous · Alt+C case · Alt+W word\n  \
+                     Alt+R regex · Tab switch fields · Alt+A replace all · Esc close · F3/Shift+F3 next/previous\n  \
+                     Ctrl+Shift+F (Esc G) search in files · F4/Shift+F4 next/previous result\n  \
+                     Ctrl+G go to line · Tab/Shift+Tab indent/outdent · Ctrl+Space complete a word\n\n\
+                     EDITOR\n  Ctrl+S save · Ctrl+W close · Ctrl+Z undo · Ctrl+Y redo\n  \
                      Shift+arrows/Home/End/PgUp/PgDn select · Ctrl+←/→ (Alt+←/→, Alt+B/F) by word, +Shift selects\n  \
                      Ctrl+Home/End file start/end · Ctrl+A select all\n  \
                      Ctrl+C copy · Ctrl+X cut · Ctrl+V paste (nothing selected: copy/cut the line)\n  \
@@ -582,7 +591,8 @@ impl App {
                      Gerrit finds nothing→ is the commit-msg hook installed? is the task branch pushed\n\
                                            to the right main? Esc g prints what it compared.\n\
                      Keys do nothing     → in a shell every key goes to the shell: use {leader} first.\n\
-                     Ctrl+Tab / Ctrl+1   → need the kitty keyboard protocol; Alt+] / Alt+1 always work.\n\
+                     Ctrl+Tab / Ctrl+1   → need the kitty keyboard protocol; Alt+] / Alt+1 always work
+                                           (so do Ctrl+Shift+F → Esc G and Ctrl+Enter → Alt+Enter).\n\
                      Text selection      → hold Shift while dragging (pahiri captures the mouse).\n\
                      Shells after restart→ Restore shells reopens them in the same folders; with the\n\
                                            tmux setting the programs themselves keep running.\n",

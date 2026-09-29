@@ -80,6 +80,10 @@ impl App {
     }
 
     pub(super) fn save_session(&mut self) {
+        // `pahiri edit` must not overwrite pahiri's session (timer, shells).
+        if self.code_mode {
+            return;
+        }
         let snap = self.session_snapshot();
         if let Err(e) = save(&self.state_dir, &snap) {
             tracing::warn!("could not save session: {e}");

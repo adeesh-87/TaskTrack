@@ -76,14 +76,18 @@ pub enum Pending {
     OpenTask(String),
     /// Replace the task's `## Description` with this text.
     RefreshDescription(String, String),
-    /// Search the editor for the entered text.
-    Find,
     /// Leave the Plan view without saving.
     PlanDiscard,
     /// Stop the timer and start it on plan item N.
     PlanStart(usize),
     /// Run the hook configured for this event now.
     RunHook(String),
+    /// Show this open file (Ctrl+E).
+    SwitchFile(std::path::PathBuf),
+    /// Move the cursor to the entered line[:column].
+    GotoLine,
+    /// Create this file (and its folders) and open it.
+    CreatePath(PathBuf),
     /// Apply the ticked audit proposals.
     AuditApply,
     /// Leave the Audit view without applying.
@@ -204,6 +208,10 @@ pub enum Popup {
     },
     /// The command palette.
     Palette(super::palette::Palette),
+    /// Ctrl+P / Ctrl+O.
+    Finder(Box<super::finder::Finder>),
+    /// Search in files (the state is `App::search`).
+    Search,
     /// Scrollable read-only text.
     Doc {
         /// Title.
@@ -305,6 +313,8 @@ impl Popup {
             | Popup::Doc { title, .. } => title,
             Popup::Tickets { source, .. } => source,
             Popup::Palette(_) => "commands",
+            Popup::Finder(f) => f.title(),
+            Popup::Search => "search in files",
             Popup::Checkpoints { .. } => "checkpoints",
             Popup::Help { .. } => "help",
         }

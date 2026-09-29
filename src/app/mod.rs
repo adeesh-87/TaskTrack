@@ -4,12 +4,16 @@
 //! [`AppEvent`]s. Drawing lives in [`crate::ui`] and only reads this state
 //! (plus lazily resizing shells to fit their pane).
 
+pub mod complete;
 pub mod config_form;
 pub mod context;
 pub mod event;
+pub mod find;
+pub mod finder;
 pub mod keymap;
 pub mod palette;
 pub mod popup;
+pub mod search;
 pub mod timer;
 pub mod ui_state;
 
@@ -178,8 +182,16 @@ pub struct App {
     session_saved: Instant,
     watched: Instant,
     leader_table: Vec<(char, LeaderCmd)>,
-    /// Last editor search.
-    search: Option<String>,
+    /// Find bar of the editor (Ctrl+F).
+    find: Option<find::FindBar>,
+    /// Files for quick open (Ctrl+P).
+    file_index: finder::FileIndex,
+    /// Search in files (Ctrl+Shift+F), kept for F4.
+    search: Option<search::SearchPanel>,
+    /// Word completion list (Ctrl+Space).
+    completion: Option<complete::Completion>,
+    /// `pahiri edit`: only the code editor (no tasks, timer or hooks).
+    code_mode: bool,
 }
 
 impl App {
@@ -258,7 +270,11 @@ impl App {
             session_saved: Instant::now(),
             watched: Instant::now(),
             leader_table,
+            find: None,
+            file_index: finder::FileIndex::default(),
             search: None,
+            completion: None,
+            code_mode: false,
         };
         app.config_mtime = app.config_file_mtime();
         if matches!(app.mode, Mode::Home) {
@@ -275,6 +291,71 @@ impl App {
             app.check_day();
         }
         app
+    }
+
+    /// `pahiri edit [PATH…]`: the code editor alone over `paths` (folders
+    /// become the file tree's roots, files are opened; none: the current
+    /// folder). No tasks, timer, hooks or session; `config` only styles it.
+    pub fn new_editor(
+        mut config: Config,
+        config_path: PathBuf,
+        state_dir: PathBuf,
+        events: EventSender,
+        paths: &[PathBuf],
+    ) -> anyhow::Result<Self> {
+        // Shells end with the editor.
+        config.shell.tmux = false;
+        // Without a config `new` opens nothing (no store, session or hooks).
+        let mut app = Self::new(None, config_path, state_dir, events);
+        app.config = config;
+        app.leader = app.config.leader();
+        app.leader_table = keymap::leader_table(&app.config.keys);
+        app.code_mode = true;
+        app.store = None;
+        app.timer = None;
+        app.popup = None;
+        app.status = None;
+        let cwd = std::env::current_dir()?;
+        let abs: Vec<PathBuf> = paths
+            .iter()
+            .map(|p| {
+                let p = Config::expand_tilde(&p.display().to_string());
+                let p = if p.is_absolute() { p } else { cwd.join(p) };
+                p.canonicalize().unwrap_or(p)
+            })
+            .collect();
+        let mut roots: Vec<PathBuf> = abs.iter().filter(|p| p.is_dir()).cloned().collect();
+        let files: Vec<PathBuf> = abs.iter().filter(|p| !p.is_dir()).cloned().collect();
+        if roots.is_empty() {
+            roots.push(
+                files
+                    .first()
+                    .and_then(|f| f.parent())
+                    .map_or(cwd, Path::to_path_buf),
+            );
+        }
+        let ctx = TaskContext::standalone(&roots, app.config.show_hidden)?;
+        let id = ctx.id.clone();
+        app.contexts.insert(id.clone(), ctx);
+        app.active_task = Some(id);
+        app.mode = Mode::Task;
+        for f in &files {
+            if f.exists() {
+                app.request_open_file(f);
+            } else {
+                app.popup = Some(Popup::confirm(
+                    "New file",
+                    format!("{} does not exist. Create it?", f.display()),
+                    Pending::CreatePath(f.clone()),
+                ));
+            }
+        }
+        Ok(app)
+    }
+
+    /// Whether this is `pahiri edit` (the code editor alone).
+    pub fn is_code_mode(&self) -> bool {
+        self.code_mode
     }
 
     /// Task list filter text and whether it is being typed.
@@ -502,6 +583,9 @@ impl App {
     }
 
     fn handle_paste(&mut self, text: &str) {
+        if self.finder_paste(text) || self.search_paste(text) {
+            return;
+        }
         match &mut self.popup {
             Some(Popup::Input { value, .. }) => {
                 value.push_str(text.lines().next().unwrap_or(""));
@@ -522,6 +606,9 @@ impl App {
             return;
         }
         if !matches!(self.mode, Mode::Task) {
+            return;
+        }
+        if self.find_has_keys() && self.find_paste(text) {
             return;
         }
         let Some(ctx) = self.active_context_mut() else {
@@ -688,7 +775,15 @@ impl App {
     }
 
     /// Switch to `candidate` (saved on the Settings view or reloaded from disk).
-    fn apply_config(&mut self, candidate: Config) {
+    fn apply_config(&mut self, mut candidate: Config) {
+        if self.code_mode {
+            // Only looks and keys: there are no tasks to reopen.
+            candidate.shell.tmux = false;
+            self.config = candidate;
+            self.leader = self.config.leader();
+            self.leader_table = keymap::leader_table(&self.config.keys);
+            return;
+        }
         let reopen = candidate.categories != self.config.categories
             || candidate.tasks_dir != self.config.tasks_dir
             || candidate.status_file != self.config.status_file
@@ -1293,6 +1388,10 @@ impl App {
     }
 
     fn back_to_list(&mut self) {
+        if self.code_mode {
+            self.request_quit();
+            return;
+        }
         let was_in_task = matches!(self.mode, Mode::Task);
         self.mode = Mode::Home;
         if let Some(id) = self.active_task.clone() {
@@ -1319,7 +1418,7 @@ impl App {
         let dirty = self
             .contexts
             .values()
-            .any(|c| c.editor.as_ref().is_some_and(Buffer::is_dirty));
+            .any(|c| c.dirty_buffers().next().is_some());
         if live > 0 || dirty {
             let mut parts = Vec::new();
             if live > 0 {
@@ -1350,6 +1449,7 @@ impl App {
     fn open_palette(&mut self) {
         let commands = keymap::apply_palette_overrides(
             match self.mode {
+                Mode::Task if self.code_mode => palette::code_commands(),
                 Mode::Task => palette::task_commands(),
                 _ => palette::list_commands(),
             },
@@ -1359,6 +1459,10 @@ impl App {
     }
 
     fn run_action(&mut self, action: Action) {
+        if self.code_mode && !action.in_editor() {
+            self.set_status("not in pahiri edit (it is the code editor alone)");
+            return;
+        }
         match action {
             Action::TaskList => self.back_to_list(),
             Action::PlanDay => {
@@ -1426,35 +1530,15 @@ impl App {
             Action::RecordOutcome => self.request_outcome(),
             Action::PushReview => self.request_git_job(gerrit::GitJob::Push),
             Action::Rebase => self.request_git_job(gerrit::GitJob::Rebase),
+            Action::SearchFiles => self.open_search(None),
             Action::Find => {
-                if self.active_context().is_some_and(|c| c.editor.is_some()) {
-                    self.popup = Some(Popup::input(
-                        "Find",
-                        "text to find in the open file (F3 / Ctrl+G: next)",
-                        self.search.clone().unwrap_or_default(),
-                        Pending::Find,
-                    ));
-                } else {
-                    self.set_status("open a file first");
+                if let Some(ctx) = self.active_context_mut() {
+                    if ctx.editor.is_some() {
+                        ctx.focus = Focus::Editor;
+                    }
                 }
+                self.open_find(false);
             }
-        }
-    }
-
-    /// Jump to the next match of the last search in the editor.
-    fn find_next(&mut self) {
-        let Some(term) = self.search.clone() else {
-            self.run_action(Action::Find);
-            return;
-        };
-        let height = self.editor_height;
-        let Some(ed) = self.active_context_mut().and_then(|c| c.editor.as_mut()) else {
-            return;
-        };
-        if ed.find_next(&term) {
-            ed.ensure_visible(height);
-        } else {
-            self.set_status(format!("not found: {term}"));
         }
     }
 
@@ -1687,6 +1771,18 @@ impl App {
                     lines.push(line);
                 }
             }
+            JobEvent::FileIndex {
+                roots,
+                files,
+                truncated,
+            } => self.index_built(&roots, files, truncated),
+            JobEvent::SearchHits { id, file } => self.search_hits(id, file),
+            JobEvent::SearchDone {
+                id,
+                searched,
+                truncated,
+                error,
+            } => self.search_done(id, searched, truncated, error),
             JobEvent::Finished(line) => {
                 if let Some(Popup::Log { lines, done, .. }) = &mut self.popup {
                     lines.push(String::new());
@@ -1825,6 +1921,10 @@ impl App {
 
     fn handle_task_key(&mut self, key: KeyEvent) {
         let Some(focus) = self.active_context().map(|c| c.focus) else {
+            if self.code_mode {
+                self.should_quit = true;
+                return;
+            }
             self.mode = Mode::Home;
             return;
         };
@@ -1838,6 +1938,21 @@ impl App {
         }
         if focus == Focus::Terminal {
             self.handle_terminal_key(key);
+            return;
+        }
+        // In the editor and the file tree, editor keys (Ctrl+B, Ctrl+Tab,
+        // Ctrl+P, …) win over the leader; the leader still works in the
+        // terminal and the shell list.
+        if focus == Focus::Editor && !self.leader_pending && self.handle_completion_key(key) {
+            return;
+        }
+        if focus == Focus::Editor && !self.leader_pending && self.handle_find_key(key) {
+            return;
+        }
+        if matches!(focus, Focus::Editor | Focus::Tree)
+            && !self.leader_pending
+            && self.handle_workspace_key(key, focus)
+        {
             return;
         }
         if self.leader_pending {
@@ -1863,23 +1978,36 @@ impl App {
                 self.run_action(Action::Help);
                 return;
             }
-            (KeyCode::F(3), _) | (KeyCode::Char('g'), KeyModifiers::CONTROL)
-                if focus == Focus::Editor =>
-            {
-                self.find_next();
+            (KeyCode::Char(' '), KeyModifiers::CONTROL) if focus == Focus::Editor => {
+                self.open_completion();
+                return;
+            }
+            (KeyCode::F(4), m) if focus == Focus::Editor => {
+                self.search_step(!m.contains(KeyModifiers::SHIFT));
+                return;
+            }
+            (KeyCode::F(3), m) if focus == Focus::Editor => {
+                self.find_step(!m.contains(KeyModifiers::SHIFT));
                 return;
             }
             (KeyCode::Char('f'), KeyModifiers::CONTROL) if focus == Focus::Editor => {
-                self.run_action(Action::Find);
+                self.open_find(false);
                 return;
             }
-            (KeyCode::Tab, m) if m.is_empty() => {
+            (KeyCode::Char('r'), KeyModifiers::CONTROL) if focus == Focus::Editor => {
+                self.open_find(true);
+                return;
+            }
+            // In the editor Tab / Shift+Tab indent; elsewhere they move between panes.
+            (KeyCode::Tab, m) if m.is_empty() && focus != Focus::Editor => {
                 if let Some(ctx) = self.active_context_mut() {
                     ctx.cycle_focus(true);
                 }
                 return;
             }
-            (KeyCode::BackTab, _) => {
+            (KeyCode::BackTab, m)
+                if !m.contains(KeyModifiers::CONTROL) && focus != Focus::Editor =>
+            {
                 if let Some(ctx) = self.active_context_mut() {
                     ctx.cycle_focus(false);
                 }
@@ -1895,19 +2023,122 @@ impl App {
         }
     }
 
-    /// Ctrl+Tab / Ctrl+Shift+Tab (kitty protocol) and Alt+] / Alt+[ cycle panes;
+    /// Keys of the editor and the file tree that act on files (not on text).
+    /// Returns whether the key was used.
+    fn handle_workspace_key(&mut self, key: KeyEvent, focus: Focus) -> bool {
+        let ctrl = key.modifiers.contains(KeyModifiers::CONTROL);
+        let shift = key.modifiers.contains(KeyModifiers::SHIFT);
+        let alt = key.modifiers.contains(KeyModifiers::ALT);
+        let Some(ctx) = self.active_context_mut() else {
+            return false;
+        };
+        let cycle_key = ctrl && matches!(key.code, KeyCode::Tab | KeyCode::BackTab);
+        if !cycle_key {
+            ctx.end_cycle();
+        }
+        if !ctrl || alt {
+            return false;
+        }
+        match key.code {
+            KeyCode::Char('b' | 'B') if !shift => {
+                if focus == Focus::Editor {
+                    ctx.focus = Focus::Tree;
+                    if let Some(p) = ctx.editor.as_ref().map(|e| e.path().to_path_buf()) {
+                        let _ = ctx.tree.reveal(&p);
+                    }
+                } else if ctx.editor.is_some() {
+                    ctx.focus = Focus::Editor;
+                }
+            }
+            KeyCode::Tab | KeyCode::BackTab => {
+                let forward = key.code == KeyCode::Tab && !shift;
+                match ctx.cycle_files(forward) {
+                    Some(_) => ctx.focus = Focus::Editor,
+                    None => self.set_status("no other open file · Ctrl+P opens one"),
+                }
+            }
+            KeyCode::Char('e') if !shift => self.open_recent_menu(),
+            KeyCode::Char('p') if !shift => self.open_quick_open(),
+            KeyCode::Char('f' | 'F') if shift => self.open_search(None),
+            // Ctrl+F in the file tree: search in the selected folder.
+            KeyCode::Char('f') if focus == Focus::Tree => {
+                let scope = ctx.tree.selected().map(|n| {
+                    if n.is_dir {
+                        n.path.clone()
+                    } else {
+                        n.path
+                            .parent()
+                            .map_or_else(|| n.path.clone(), Path::to_path_buf)
+                    }
+                });
+                self.open_search(scope);
+            }
+            KeyCode::Char('o') if !shift => self.open_path_prompt(),
+            KeyCode::Char('g') if !shift && focus == Focus::Editor => {
+                let lines = ctx.editor.as_ref().map_or(0, |e| e.lines().len());
+                self.popup = Some(Popup::input(
+                    "Go to line",
+                    format!("line, or line:column (1–{lines})"),
+                    "",
+                    Pending::GotoLine,
+                ));
+            }
+            _ => return false,
+        }
+        true
+    }
+
+    /// Ctrl+E: the open files, most recent first.
+    fn open_recent_menu(&mut self) {
+        let Some(ctx) = self.active_context() else {
+            return;
+        };
+        let choices: Vec<Choice> = ctx
+            .editor
+            .iter()
+            .chain(&ctx.recent)
+            .map(|b| {
+                let root = ctx.tree.root_of(b.path());
+                let rel = b.path().strip_prefix(root).unwrap_or(b.path());
+                let shown = if root == ctx.tree.root() {
+                    rel.display().to_string()
+                } else {
+                    format!(
+                        "{}/{}",
+                        root.file_name()
+                            .map_or_else(String::new, |n| n.to_string_lossy().into_owned()),
+                        rel.display()
+                    )
+                };
+                Choice {
+                    label: format!("{}{shown}", if b.is_dirty() { "● " } else { "  " }),
+                    pending: Pending::SwitchFile(b.path().to_path_buf()),
+                }
+            })
+            .collect();
+        if choices.is_empty() {
+            self.set_status("no open files · Ctrl+P opens one");
+            return;
+        }
+        self.popup = Some(Popup::choose("Open files (● unsaved)", choices));
+    }
+
+    /// Alt+] / Alt+[ (and Ctrl+Tab outside the editor and
+    /// the file tree) cycle panes;
     /// Ctrl+N / Alt+N focus shell N. Returns `Some(true)` when consumed.
     fn handle_pane_keys(&mut self, key: KeyEvent) -> Option<bool> {
         let ctrl = key.modifiers.contains(KeyModifiers::CONTROL);
         let alt = key.modifiers.contains(KeyModifiers::ALT);
         let shift = key.modifiers.contains(KeyModifiers::SHIFT);
         let ctx = self.active_context_mut()?;
+        // In the editor and the file tree Ctrl+Tab switches files instead.
+        let files = matches!(ctx.focus, Focus::Editor | Focus::Tree);
         match key.code {
-            KeyCode::Tab if ctrl => {
+            KeyCode::Tab if ctrl && !files => {
                 ctx.cycle_focus(!shift);
                 Some(true)
             }
-            KeyCode::BackTab if ctrl => {
+            KeyCode::BackTab if ctrl && !files => {
                 ctx.cycle_focus(false);
                 Some(true)
             }
@@ -1934,7 +2165,12 @@ impl App {
         let Some(ctx) = self.active_context_mut() else {
             return;
         };
-        let root = ctx.tree.root().to_path_buf();
+        // The folder file operations act in: the task folder or the attached
+        // workspace / build the selection is in.
+        let root = ctx.tree.selected().map_or_else(
+            || ctx.tree.root().to_path_buf(),
+            |n| ctx.tree.root_of(&n.path).to_path_buf(),
+        );
         let mut next = Next::None;
         let result: std::io::Result<()> = match (key.code, key.modifiers) {
             (KeyCode::Down, _) | (KeyCode::Char('j'), _) => {
@@ -1953,8 +2189,8 @@ impl App {
                 ctx.tree.select_last();
                 Ok(())
             }
-            (KeyCode::Right, _) | (KeyCode::Char('l'), _) => ctx.tree.expand_selected(),
-            (KeyCode::Left, _) | (KeyCode::Char('h'), _) => ctx.tree.collapse_selected(),
+            (KeyCode::Right | KeyCode::Char('l' | '+' | '='), _) => ctx.tree.expand_selected(),
+            (KeyCode::Left | KeyCode::Char('h' | '-'), _) => ctx.tree.collapse_selected(),
             (KeyCode::Enter, _) => match ctx.tree.toggle_selected() {
                 Ok(true) => Ok(()),
                 Ok(false) => {
@@ -1967,7 +2203,12 @@ impl App {
             },
             (KeyCode::Char('.'), _) => ctx.tree.toggle_hidden(),
             (KeyCode::Char('r'), KeyModifiers::NONE) | (KeyCode::F(2), _) => {
-                if let Some(node) = ctx.tree.selected() {
+                if ctx.tree.selected().is_some_and(|n| n.root) {
+                    next = Next::Status(
+                        "an attached workspace or build: rename it on disk and in the settings"
+                            .into(),
+                    );
+                } else if let Some(node) = ctx.tree.selected() {
                     next = Next::Popup(Popup::input(
                         "Rename",
                         "new name",
@@ -2049,20 +2290,13 @@ impl App {
         }
     }
 
+    /// Show `path` in the editor: from the open files if it is one of them
+    /// (unsaved changes and all), else read it. The file shown before stays open.
     fn request_open_file(&mut self, path: &Path) {
-        if let Some(ed) = self.active_context().and_then(|c| c.editor.as_ref()) {
-            if ed.path() == path {
-                if let Some(ctx) = self.active_context_mut() {
-                    ctx.focus = Focus::Editor;
-                }
-                return;
-            }
-            if ed.is_dirty() {
-                self.popup = Some(Popup::confirm(
-                    "Discard changes?",
-                    format!("{} has unsaved changes.", ed.path().display()),
-                    Pending::OpenDiscard(path.to_path_buf()),
-                ));
+        if let Some(ctx) = self.active_context_mut() {
+            if ctx.activate_recent(path) {
+                ctx.focus = Focus::Editor;
+                ctx.zoomed = false;
                 return;
             }
         }
@@ -2089,10 +2323,16 @@ impl App {
     }
 
     fn open_file(&mut self, path: &Path) {
+        if let Some(ctx) = self.active_context_mut() {
+            if ctx.activate_recent(path) {
+                ctx.focus = Focus::Editor;
+                return;
+            }
+        }
         match Buffer::open(path) {
             Ok(buffer) => {
                 if let Some(ctx) = self.active_context_mut() {
-                    ctx.editor = Some(buffer);
+                    ctx.show_buffer(buffer);
                     ctx.focus = Focus::Editor;
                     ctx.zoomed = false;
                 }
@@ -2126,6 +2366,7 @@ impl App {
             match std::fs::write(ed.path(), &m) {
                 Ok(()) => {
                     ed.replace_saved(&m);
+                    ed.mark_disk_seen();
                     let _ = ctx.tree.refresh();
                     let _ = ctx.reload_meta();
                     Next::Status("Saved · merged pahiri's changes made while you edited".into())
@@ -2164,13 +2405,13 @@ impl App {
                 Pending::CloseEditorDiscard,
             ));
         } else {
-            ctx.editor = None;
-            ctx.focus = Focus::Tree;
+            ctx.close_active();
         }
     }
 
     fn handle_editor_key(&mut self, key: KeyEvent) {
         let height = self.editor_height;
+        let tab_width = usize::from(self.config.tab_width.max(1));
         let ctrl = key.modifiers.contains(KeyModifiers::CONTROL);
         let alt = key.modifiers.contains(KeyModifiers::ALT);
         let shift = key.modifiers.contains(KeyModifiers::SHIFT);
@@ -2257,10 +2498,11 @@ impl App {
                 ed.delete_word_right();
             }
             (KeyCode::Char('d'), KeyModifiers::ALT) => ed.delete_word_right(),
-            (KeyCode::Enter, _) => ed.insert_newline(),
+            (KeyCode::Enter, _) => ed.insert_newline_indented(&ed.indent_unit(tab_width)),
             (KeyCode::Backspace, _) => ed.backspace(),
             (KeyCode::Delete, _) => ed.delete(),
-            (KeyCode::Tab, _) => ed.insert_char('\t'),
+            (KeyCode::Tab, _) => ed.indent(&ed.indent_unit(tab_width)),
+            (KeyCode::BackTab, _) => ed.outdent(&ed.indent_unit(tab_width)),
             (KeyCode::Char(c), m)
                 if !m.contains(KeyModifiers::CONTROL) && !m.contains(KeyModifiers::ALT) =>
             {
@@ -2526,6 +2768,8 @@ impl App {
         };
         match popup {
             Popup::Message { .. } => {}
+            Popup::Finder(f) => self.handle_finder_key(f, key),
+            Popup::Search => self.handle_search_key(key),
             Popup::Log {
                 title,
                 mut lines,
@@ -2925,8 +3169,48 @@ impl App {
             Pending::OpenDiscard(path) => self.probe_and_open(&path),
             Pending::CloseEditorDiscard => {
                 if let Some(ctx) = self.active_context_mut() {
-                    ctx.editor = None;
-                    ctx.focus = Focus::Tree;
+                    ctx.close_active();
+                }
+            }
+            Pending::SwitchFile(path) => self.request_open_file(&path),
+            Pending::CreatePath(path) => {
+                let made = path
+                    .parent()
+                    .map_or(Ok(()), std::fs::create_dir_all)
+                    .and_then(|()| {
+                        std::fs::OpenOptions::new()
+                            .write(true)
+                            .create_new(true)
+                            .open(&path)
+                    });
+                match made {
+                    Ok(_) => {
+                        if let Some(ctx) = self.active_context_mut() {
+                            let _ = ctx.tree.refresh();
+                        }
+                        self.open_at(&path, None);
+                    }
+                    Err(e) => self.error(format!("cannot create {}: {e}", path.display())),
+                }
+            }
+            Pending::GotoLine => {
+                let text = input.unwrap_or_default();
+                let mut parts = text.trim().split([':', ',', ' ']);
+                let line = parts.next().and_then(|l| l.trim().parse::<usize>().ok());
+                let col = parts
+                    .next()
+                    .and_then(|c| c.trim().parse::<usize>().ok())
+                    .unwrap_or(1);
+                let height = self.editor_height;
+                match (
+                    line,
+                    self.active_context_mut().and_then(|c| c.editor.as_mut()),
+                ) {
+                    (Some(l), Some(ed)) => {
+                        ed.goto(l, col);
+                        ed.set_scroll(ed.cursor().0.saturating_sub(height / 3));
+                    }
+                    _ => self.set_status(format!("not a line number: {text}")),
                 }
             }
             Pending::Rename(path) => {
@@ -3033,12 +3317,6 @@ impl App {
                     }
                 }
             }
-            Pending::Find => {
-                if let Some(term) = input {
-                    self.search = Some(term);
-                    self.find_next();
-                }
-            }
         }
     }
 
@@ -3050,7 +3328,10 @@ impl App {
         let Some(ctx) = self.active_context_mut() else {
             return;
         };
-        let root = ctx.tree.root().to_path_buf();
+        let root = ctx.tree.selected().map_or_else(
+            || ctx.tree.root().to_path_buf(),
+            |n| ctx.tree.root_of(&n.path).to_path_buf(),
+        );
         match op(&root) {
             Ok(created) => {
                 let _ = ctx.tree.refresh();

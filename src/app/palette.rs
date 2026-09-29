@@ -81,11 +81,13 @@ pub enum Action {
     Rebase,
     /// Find text in the editor.
     Find,
+    /// Search in files.
+    SearchFiles,
 }
 
 impl Action {
     /// Every action (for key overrides and help).
-    pub const ALL: [Action; 39] = [
+    pub const ALL: [Action; 40] = [
         Self::TaskList,
         Self::PlanDay,
         Self::RunHook,
@@ -125,6 +127,7 @@ impl Action {
         Self::PushReview,
         Self::Rebase,
         Self::Find,
+        Self::SearchFiles,
     ];
 
     /// Name used for key overrides (`palette.<name>`).
@@ -169,7 +172,30 @@ impl Action {
             Self::PushReview => "push_review",
             Self::Rebase => "rebase",
             Self::Find => "find",
+            Self::SearchFiles => "search_files",
         }
+    }
+
+    /// Whether the action works in `pahiri edit` (no tasks).
+    pub fn in_editor(self) -> bool {
+        matches!(
+            self,
+            Self::Find
+                | Self::SearchFiles
+                | Self::NewShell
+                | Self::CloseShell
+                | Self::FocusFiles
+                | Self::FocusEditor
+                | Self::FocusShells
+                | Self::FocusTerminal
+                | Self::Zoom
+                | Self::ToggleHidden
+                | Self::Save
+                | Self::CloseEditor
+                | Self::Help
+                | Self::Quit
+                | Self::Refresh
+        )
     }
 
     /// Look up by name.
@@ -283,8 +309,13 @@ pub fn task_commands() -> Vec<Command> {
         cmd('E', "edit AI prompt templates", Action::EditPrompts),
         cmd(
             'F',
-            "find in the editor (then F3 / Ctrl+G for next)",
+            "find in the editor (Ctrl+F; F3 next, Ctrl+R replace)",
             Action::Find,
+        ),
+        cmd(
+            'G',
+            "search in files (Ctrl+Shift+F; F4 next result)",
+            Action::SearchFiles,
         ),
         cmd('s', "new shell", Action::NewShell),
         cmd('x', "close selected shell", Action::CloseShell),
@@ -305,6 +336,18 @@ pub fn task_commands() -> Vec<Command> {
         cmd('h', "help page (F1)", Action::Help),
         cmd('q', "quit pahiri", Action::Quit),
     ]
+}
+
+/// Commands of `pahiri edit` (the task view's, minus everything about tasks).
+pub fn code_commands() -> Vec<Command> {
+    task_commands()
+        .into_iter()
+        .filter(|c| c.action.in_editor())
+        .map(|c| match c.action {
+            Action::Quit => cmd(c.key, "quit", Action::Quit),
+            _ => c,
+        })
+        .collect()
 }
 
 /// Palette state.

@@ -78,7 +78,7 @@ filter, `Enter` to run, `Esc` to close.
 | `g` | Gerrit: find changes on the task branches (+ their status) |
 | `P` / `R` | Gerrit: push for review / rebase the task branches onto main |
 | `O` | record a one-line outcome (for reviews) |
-| `F` | find in the editor (F3 / Ctrl+G: next) |
+| `F` / `G` | find in the editor (`Ctrl+F`) / search in files (`Ctrl+Shift+F`) |
 | `E` | edit the AI prompt templates |
 | `D` | delete the task (moved to `.trash`) |
 | `T` | back to Home |
@@ -99,8 +99,10 @@ filter, `Enter` to run, `Esc` to close.
 
 ### Panes and shells
 
-* `Ctrl+Tab` / `Ctrl+Shift+Tab` cycle files → editor → shells → terminal,
-  from every pane including the terminal. `Alt+]` / `Alt+[` do the same.
+* `Alt+]` / `Alt+[` cycle files → editor → shells → terminal, from every
+  pane including the terminal. `Ctrl+Tab` / `Ctrl+Shift+Tab` do the same
+  from the shells and the terminal; in the editor and the file tree they
+  switch between open files (see *Code editing*).
 * `Ctrl+1..9` (or `Alt+1..9`) select shell N and focus the terminal.
 * Inside the terminal every other key goes to the shell. The leader
   (default `ctrl+b`, like tmux and herdr) prefixes pahiri commands:
@@ -108,7 +110,9 @@ filter, `Enter` to run, `Esc` to close.
   `leader h`/`l` previous/next shell, `leader Esc` palette,
   `leader a` coding agent, `leader m` timer, `leader v` checkpoint done,
   `leader leader` sends the leader key itself. `Shift+PgUp/PgDn` scroll.
-  The leader works from every task pane, not only the terminal.
+  The leader works in the terminal and the shell list; in the editor and
+  the file tree `Ctrl+B` switches between the two instead (press `s` or
+  `Alt+]` to get to the shells).
 
 Ctrl+Tab and Ctrl+digit need the
 [kitty keyboard protocol](https://sw.kovidgoyal.net/kitty/keyboard-protocol/)
@@ -169,7 +173,8 @@ emulator as usual. `mouse = false` in the config turns capture off.
 | `Ctrl+V` | paste |
 | `Ctrl+Backspace` (`Ctrl+H`, `Alt+Backspace`) / `Ctrl+Delete` (`Alt+D`) | delete a word back / forward |
 | `Ctrl+Z` / `Ctrl+Y` | undo / redo |
-| `Ctrl+F`, `F3` / `Ctrl+G` | find, next match |
+| `Tab` / `Shift+Tab` | indent / outdent (the selected lines too), in the file's own style |
+| `Ctrl+G` | go to line (`120` or `120:8`) |
 | `Ctrl+S` / `Ctrl+W` | save / close |
 
 Typing, `Enter`, `Backspace` or a paste replace the selection. In the editor
@@ -184,6 +189,42 @@ Windows Terminal, xterm with `allowWindowOps`; inside tmux set
 (`wl-paste -n`, `xclip -o -selection clipboard`, `pbpaste`) when it is set.
 Your terminal's own paste (`Ctrl+Shift+V`, `Cmd+V`, middle click) always works
 too.
+
+### Code editing
+
+The editor is meant to be enough for day-to-day code work: the file tree
+shows the task folder **and** its attached code workspaces and builds (as
+extra roots), and one file shows at a time with the others kept on a stack.
+
+| keys | what |
+| ---- | ---- |
+| `Ctrl+B` | editor ⇄ file tree (the tree shows the open file); `+` / `-` expand / collapse, `Enter` opens |
+| `Ctrl+Tab` / `Ctrl+Shift+Tab` | most recent open file / back (hold `Ctrl` and press `Tab` again to go further) |
+| `Ctrl+E` | list of open files (● unsaved) |
+| `Ctrl+P` | quick open: type 2+ characters of a path, fuzzy (`sock.c` finds `net/socket.c`; fzf syntax: `'exact`, `^start`, `end$`, `!not`) or a regex when it has `( [ * + ? \| \`; `name:120` opens at line 120 |
+| `Ctrl+O` | open a path: starts in the open file's folder, lists what is there as you type; `Tab`/`Enter` take the selected entry, `Ctrl+Enter` (`Alt+Enter`) opens exactly what is typed (a new file after asking) |
+| `Ctrl+F` / `Ctrl+R` | find / replace in the file: every match is highlighted; `Enter` / `Shift+Enter` next / previous, `Alt+C` case, `Alt+W` whole word, `Alt+R` regex (`$1` in the replacement), `Tab` switches fields, `Alt+A` replaces all (one undo), `Esc` closes |
+| `F3` / `Shift+F3` | next / previous match with the bar closed |
+| `Ctrl+Shift+F` | search in files (below); `Ctrl+F` in the file tree searches the selected folder |
+| `F4` / `Shift+F4` | next / previous search result |
+| `Ctrl+Space` | complete the word from the open files (`↑/↓`, `Tab`/`Enter`, keep typing to narrow) |
+
+**Search in files** looks through the task folder and the attached code
+workspaces (builds too once you switch them on) in the background, skipping
+what `.gitignore` lists, hidden folders and binary files, like ripgrep. The
+panel has the search text (with the same case / word / regex switches), an
+*include* and an *exclude* field (comma-separated globs such as `*.c, *.h`
+or `build, *.o`) and a switch per folder (`Tab` to it, `←/→`, `Space`).
+`Enter` searches; results are grouped by file, `Enter` opens one with the
+match selected, and `F4` walks through the rest from the editor. The panel
+keeps its settings until you close pahiri.
+
+Also: `Enter` keeps the indentation (one more level after `{`, `(`, `[`),
+files keep their line endings (CRLF stays CRLF), and a file that changes
+on disk is reloaded when it has no unsaved changes (you are told when it
+has). The terminal keys `Ctrl+Tab`, `Ctrl+Shift+F` and `Ctrl+Enter` need
+the kitty keyboard protocol (see *Panes and shells*); elsewhere use
+`Alt+]`, `Esc G` and `Alt+Enter`.
 
 ### Syntax highlighting
 
@@ -629,12 +670,13 @@ one, `d` deletes. Workspaces are written as `name = /path @main-branch`
 | Home: Today | `↑/↓` move · `Enter` timer · `Space` tick · `J`/`K` order · `x` remove · `o` open task · `p` plan · `Tab` board |
 | Audit | `Space` tick · `Enter` decide / rename · `A` all/none · `a` apply · `Esc` leave |
 | Plan | `Space` pick · `s` suggest · `a` / `t` add · `Tab` / `←→` switch sides · `J`/`K` order · `x` remove · `A` all columns · `Enter` save · `Esc` cancel |
-| files | `Enter` open/toggle · `←/→` collapse/expand · `a`/`A` new file/folder · `r` rename · `d` delete · `.` hidden · `t` shell |
+| files | `Enter` open/toggle · `←/→` or `-`/`+` collapse/expand · `a`/`A` new file/folder · `r` rename · `d` delete · `.` hidden · `t` shell · `Ctrl+B` editor · `Ctrl+F` search this folder |
 | shells | `Enter` focus · `n` new · `x` close · `←` hide pane |
-| editor | `Ctrl+S` save · `Ctrl+W` close · `Ctrl+Z`/`Ctrl+Y` undo/redo · `Ctrl+F` find · `F3`/`Ctrl+G` next · selection and clipboard: see *Editing* |
+| editor | `Ctrl+S` save · `Ctrl+W` close · `Ctrl+Z`/`Ctrl+Y` undo/redo · `Ctrl+F`/`Ctrl+R` find/replace · `F3` next · `Ctrl+G` line · `Ctrl+P`/`Ctrl+O` open · `Ctrl+Tab` files · `Ctrl+Space` complete · see *Editing* and *Code editing* |
 
 Large or binary files ask before opening; binaries open read-only as a hex
-dump. Rename, create and delete always act on the task folder only.
+dump. Rename, create and delete act inside the task folder and the
+attached folders only, never on a root itself.
 
 ## Development
 

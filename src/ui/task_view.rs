@@ -8,6 +8,7 @@ use ratatui::text::{Line, Span};
 use ratatui::widgets::{Block, List, ListItem, Paragraph, Wrap};
 use ratatui::Frame;
 
+use crate::app::find::{FindBar, FindField, Hit};
 use crate::app::{App, Focus};
 use crate::editor::{display_col, expand_tabs};
 use crate::highlight::{Kind, Language, State};
@@ -18,12 +19,24 @@ use super::Theme;
 
 /// Left column inside a task: task header, file tree, shell list.
 pub fn draw_sidebar(frame: &mut Frame<'_>, app: &mut App, area: Rect, theme: &Theme) {
+    let code_mode = app.is_code_mode();
     let Some(ctx) = app.active_context() else {
         return;
     };
-    let summary = ctx.attachment_summary();
-    let plan = ctx.plan_summary();
-    let plan_lines = if format!(" {plan}").chars().count() > area.width as usize {
+    // `pahiri edit`: one line with the folder, nothing about a task.
+    let summary = if code_mode {
+        String::new()
+    } else {
+        ctx.attachment_summary()
+    };
+    let plan = if code_mode {
+        String::new()
+    } else {
+        ctx.plan_summary()
+    };
+    let plan_lines = if code_mode {
+        0
+    } else if format!(" {plan}").chars().count() > area.width as usize {
         2
     } else {
         1
@@ -36,7 +49,11 @@ pub fn draw_sidebar(frame: &mut Frame<'_>, app: &mut App, area: Rect, theme: &Th
     ])
     .areas(area);
 
-    let title = format!(" ◀ {} ", ctx.id);
+    let title = if code_mode {
+        format!(" {} ", ctx.dir.display())
+    } else {
+        format!(" ◀ {} ", ctx.id)
+    };
     let mut header_lines = vec![Line::styled(
         shorten(&title, area.width as usize),
         Style::new().fg(theme.header).add_modifier(Modifier::BOLD),
@@ -81,7 +98,9 @@ pub fn draw_sidebar(frame: &mut Frame<'_>, app: &mut App, area: Rect, theme: &Th
             } else {
                 "  "
             };
-            let style = if n.is_dir {
+            let style = if n.root {
+                Style::new().fg(theme.header).add_modifier(Modifier::BOLD)
+            } else if n.is_dir {
                 Style::new().fg(theme.accent)
             } else {
                 Style::new()
@@ -253,6 +272,7 @@ fn draw_editor(frame: &mut Frame<'_>, app: &mut App, area: Rect, theme: &Theme) 
     let tab_width = usize::from(app.config().tab_width.max(1));
     let highlighting = app.config().syntax_highlighting;
     let soft_wrap = app.config().soft_wrap;
+    let bar = app.find_bar().filter(|f| f.open).map(FindBar::snapshot);
     let Some(ctx) = app.active_context_mut() else {
         return;
     };
@@ -293,8 +313,23 @@ fn draw_editor(frame: &mut Frame<'_>, app: &mut App, area: Rect, theme: &Theme) 
             Style::new().fg(theme.muted),
         ))
         .border_style(theme.border(focused));
-    let inner = block.inner(area);
+    let mut inner = block.inner(area);
     frame.render_widget(block, area);
+    let bar_rows = match &bar {
+        Some(b) if b.replacing => 2,
+        Some(_) => 1,
+        None => 0,
+    };
+    let bar_area = if inner.height > bar_rows + 1 {
+        inner.height -= bar_rows;
+        Rect {
+            y: inner.y + inner.height,
+            height: bar_rows,
+            ..inner
+        }
+    } else {
+        Rect::default()
+    };
     if inner.height == 0 || inner.width == 0 {
         return;
     }
@@ -444,6 +479,31 @@ fn draw_editor(frame: &mut Frame<'_>, app: &mut App, area: Rect, theme: &Theme) 
         }
     }
 
+    let bar_cursor = bar.as_ref().and_then(|b| {
+        let first = rows.first().map_or(0, |r| r.0);
+        let last = rows.last().map_or(0, |r| r.0 + 1);
+        let (hits, current, total) = app.visible_hits(first, last);
+        let ed = app.active_context().and_then(|c| c.editor.as_ref())?;
+        paint_hits(
+            frame,
+            ed,
+            &hits,
+            current.map(|c| c.1),
+            &rows,
+            (inner.x + gutter, inner.x + inner.width, inner.y),
+            text_width,
+            tab_width,
+            theme,
+        );
+        draw_find_bar(frame, b, current.map(|c| c.0), total, bar_area, theme)
+    });
+    let bar_focused = bar.as_ref().is_some_and(|b| b.focused);
+    if focused && bar_focused {
+        if let Some((x, y)) = bar_cursor {
+            frame.set_cursor_position(Position::new(x, y));
+        }
+    }
+    let focused = focused && !bar_focused;
     if focused {
         if let Some((cx, cy)) = cursor_pos {
             let x = inner.x + gutter + cx;
@@ -453,11 +513,199 @@ fn draw_editor(frame: &mut Frame<'_>, app: &mut App, area: Rect, theme: &Theme) 
             }
         }
     }
+    if let (true, Some(c), Some((cx, cy))) = (focused, app.completion(), cursor_pos) {
+        draw_completion(
+            frame,
+            c,
+            inner,
+            (inner.x + gutter + cx, inner.y + cy),
+            theme,
+        );
+    }
     app.ui.editor = inner;
     app.ui.editor_gutter = gutter;
     app.ui.editor_hscroll = hscroll;
     app.ui.editor_rows = rows;
     app.set_editor_height(inner.height as usize);
+}
+
+/// The Ctrl+Space list under (or above) the cursor at `at`.
+fn draw_completion(
+    frame: &mut Frame<'_>,
+    c: &crate::app::complete::Completion,
+    area: Rect,
+    at: (u16, u16),
+    theme: &Theme,
+) {
+    let rows = c.items.len().min(8) as u16;
+    let width = c
+        .items
+        .iter()
+        .map(|w| w.chars().count())
+        .max()
+        .unwrap_or(0)
+        .min(40) as u16
+        + 2;
+    if area.width < width || area.height < rows + 1 {
+        return;
+    }
+    let x = at.0.min(area.x + area.width - width);
+    let y = if at.1 + 1 + rows <= area.y + area.height {
+        at.1 + 1
+    } else {
+        at.1.saturating_sub(rows).max(area.y)
+    };
+    let rect = Rect {
+        x,
+        y,
+        width,
+        height: rows,
+    };
+    let first = c.selected.saturating_sub(rows as usize - 1);
+    let lines: Vec<Line<'_>> = c
+        .items
+        .iter()
+        .enumerate()
+        .skip(first)
+        .take(rows as usize)
+        .map(|(i, w)| {
+            let style = if i == c.selected {
+                theme.selected(true)
+            } else {
+                Style::new().bg(theme.bar_bg).fg(theme.fg)
+            };
+            Line::styled(format!(" {w:<w2$} ", w2 = width as usize - 2), style)
+        })
+        .collect();
+    frame.render_widget(ratatui::widgets::Clear, rect);
+    frame.render_widget(Paragraph::new(lines), rect);
+}
+
+/// Mark the find matches on the visible rows (the selected one already
+/// shows as the selection). `cols` is (text x, right edge x, top y).
+#[allow(clippy::too_many_arguments)]
+fn paint_hits(
+    frame: &mut Frame<'_>,
+    ed: &crate::editor::Buffer,
+    hits: &[Hit],
+    current: Option<Hit>,
+    rows: &[(usize, usize)],
+    cols: (u16, u16, u16),
+    text_width: usize,
+    tab_width: usize,
+    theme: &Theme,
+) {
+    let (text_x, right, top) = cols;
+    let style = Style::new().bg(theme.warning).fg(theme.bg);
+    let buf = frame.buffer_mut();
+    for (vi, &(i, chunk_start)) in rows.iter().enumerate() {
+        let chunk_end = match rows.get(vi + 1) {
+            Some(&(next, s)) if next == i => s,
+            _ => chunk_start + text_width,
+        };
+        let line = &ed.lines()[i];
+        let from = hits.partition_point(|h| h.row < i);
+        for h in hits[from..].iter().take_while(|h| h.row == i) {
+            if Some(*h) == current {
+                continue;
+            }
+            let a = display_col(line, h.start, tab_width);
+            let b = display_col(line, h.end, tab_width);
+            for col in a.max(chunk_start)..b.min(chunk_end) {
+                let x = text_x + (col - chunk_start) as u16;
+                if x < right {
+                    buf[(x, top + vi as u16)].set_style(style);
+                }
+            }
+        }
+    }
+}
+
+/// The find bar under the editor: query (and replacement), switches and
+/// the match count. Returns where the cursor goes when it has the keys.
+fn draw_find_bar(
+    frame: &mut Frame<'_>,
+    bar: &FindBar,
+    current: Option<usize>,
+    total: usize,
+    area: Rect,
+    theme: &Theme,
+) -> Option<(u16, u16)> {
+    if area.height == 0 || area.width < 20 {
+        return None;
+    }
+    let bg = Style::new().bg(theme.bar_bg).fg(theme.fg);
+    let switch = |on: bool, label: &'static str| {
+        let style = if on {
+            Style::new().fg(theme.accent).add_modifier(Modifier::BOLD)
+        } else {
+            Style::new().fg(theme.muted)
+        };
+        Span::styled(label, style)
+    };
+    let status = match (&bar.error, current) {
+        (Some(e), _) => Span::styled(format!(" {e} "), Style::new().fg(theme.error)),
+        (None, _) if bar.query.is_empty() => Span::raw(""),
+        (None, _) if total == 0 => Span::styled(" no matches ", Style::new().fg(theme.warning)),
+        (None, Some(i)) => Span::raw(format!(" {}/{total} ", i + 1)),
+        (None, None) => Span::raw(format!(" {total} ")),
+    };
+    let right = vec![
+        status,
+        switch(bar.case, " Aa"),
+        switch(bar.word, " ab"),
+        switch(bar.regex, " .* "),
+    ];
+    let right_w: usize = right.iter().map(Span::width).sum();
+    let mut cursor = None;
+    let fields: &[(&str, &str, FindField)] = if bar.replacing {
+        &[
+            (" find ", &bar.query, FindField::Query),
+            (" with ", &bar.replace, FindField::Replace),
+        ]
+    } else {
+        &[(" find ", &bar.query, FindField::Query)]
+    };
+    for (n, (label, text, field)) in fields.iter().enumerate() {
+        if n as u16 >= area.height {
+            break;
+        }
+        let y = area.y + n as u16;
+        let active = bar.focused && bar.field == *field;
+        let room = (area.width as usize)
+            .saturating_sub(label.len() + 1 + if n == 0 { right_w } else { 0 });
+        let count = text.chars().count();
+        let shown: String = text.chars().skip(count.saturating_sub(room)).collect();
+        let label_style = if active {
+            Style::new().fg(theme.accent).add_modifier(Modifier::BOLD)
+        } else {
+            Style::new().fg(theme.muted)
+        };
+        let mut spans = vec![Span::styled(*label, label_style), Span::raw(shown.clone())];
+        let used = label.len() + shown.chars().count();
+        if n == 0 {
+            let pad = (area.width as usize).saturating_sub(used + right_w);
+            spans.push(Span::raw(" ".repeat(pad)));
+            spans.extend(right.clone());
+        } else {
+            let hint = " Enter: replace · Alt+A: all";
+            if used + hint.len() < area.width as usize {
+                let pad = area.width as usize - used - hint.len();
+                spans.push(Span::raw(" ".repeat(pad)));
+                spans.push(Span::styled(hint, Style::new().fg(theme.muted)));
+            }
+        }
+        let row = Rect {
+            y,
+            height: 1,
+            ..area
+        };
+        frame.render_widget(Paragraph::new(Line::from(spans)).style(bg), row);
+        if active {
+            cursor = Some((area.x + used as u16, y));
+        }
+    }
+    cursor
 }
 
 /// Draw the active shell into `area`, resizing the PTY to fit.
