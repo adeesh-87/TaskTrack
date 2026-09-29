@@ -81,11 +81,13 @@ pub enum Action {
     Rebase,
     /// Find text in the editor.
     Find,
+    /// Search in files.
+    SearchFiles,
 }
 
 impl Action {
     /// Every action (for key overrides and help).
-    pub const ALL: [Action; 39] = [
+    pub const ALL: [Action; 40] = [
         Self::TaskList,
         Self::PlanDay,
         Self::RunHook,
@@ -125,6 +127,7 @@ impl Action {
         Self::PushReview,
         Self::Rebase,
         Self::Find,
+        Self::SearchFiles,
     ];
 
     /// Name used for key overrides (`palette.<name>`).
@@ -169,6 +172,7 @@ impl Action {
             Self::PushReview => "push_review",
             Self::Rebase => "rebase",
             Self::Find => "find",
+            Self::SearchFiles => "search_files",
         }
     }
 
@@ -285,6 +289,11 @@ pub fn task_commands() -> Vec<Command> {
             'F',
             "find in the editor (Ctrl+F; F3 next, Ctrl+R replace)",
             Action::Find,
+        ),
+        cmd(
+            'G',
+            "search in files (Ctrl+Shift+F; F4 next result)",
+            Action::SearchFiles,
         ),
         cmd('s', "new shell", Action::NewShell),
         cmd('x', "close selected shell", Action::CloseShell),

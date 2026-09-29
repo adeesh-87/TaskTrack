@@ -4,6 +4,7 @@ mod audit_view;
 mod config_page;
 mod plan_view;
 mod popup;
+mod search_view;
 mod task_card;
 mod task_list;
 mod task_view;
@@ -76,7 +77,9 @@ pub fn draw(frame: &mut Frame<'_>, app: &mut App) {
 
     draw_status_bar(frame, app, bar, &theme);
 
-    if let Some(p) = app.popup() {
+    if matches!(app.popup(), Some(crate::app::Popup::Search)) {
+        search_view::draw(frame, app, main, &theme);
+    } else if let Some(p) = app.popup() {
         popup::draw(frame, p, main, &theme);
     }
 

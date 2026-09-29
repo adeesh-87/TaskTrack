@@ -113,32 +113,13 @@ impl FindBar {
         }
         let key = self.key();
         if self.compiled.as_ref().map(|(k, _)| k) != Some(&key) {
-            let body = if self.regex {
-                self.query.clone()
-            } else {
-                regex::escape(&self.query)
-            };
-            let body = if self.word {
-                format!(r"\b(?:{body})\b")
-            } else {
-                body
-            };
-            match RegexBuilder::new(&body)
-                .case_insensitive(!self.case)
-                .build()
-            {
+            match build_regex(&self.query, self.regex, self.case, self.word) {
                 Ok(re) => {
                     self.error = None;
                     self.compiled = Some((key, re));
                 }
                 Err(e) => {
-                    self.error = Some(
-                        e.to_string()
-                            .lines()
-                            .last()
-                            .unwrap_or("invalid pattern")
-                            .to_owned(),
-                    );
+                    self.error = Some(e);
                     self.compiled = None;
                 }
             }
@@ -212,6 +193,31 @@ impl FindBar {
         caps.expand(&replace, &mut out);
         Some(out)
     }
+}
+
+/// Compile a search: `query` as a regex or literal text, case-insensitive
+/// unless `case`, whole words only with `word`. The error is one line.
+pub fn build_regex(query: &str, regex: bool, case: bool, word: bool) -> Result<Regex, String> {
+    let body = if regex {
+        query.to_owned()
+    } else {
+        regex::escape(query)
+    };
+    let body = if word {
+        format!(r"\b(?:{body})\b")
+    } else {
+        body
+    };
+    RegexBuilder::new(&body)
+        .case_insensitive(!case)
+        .build()
+        .map_err(|e| {
+            e.to_string()
+                .lines()
+                .last()
+                .unwrap_or("invalid pattern")
+                .to_owned()
+        })
 }
 
 /// Delete the word before the end of the bar's field.
@@ -476,7 +482,7 @@ impl App {
                 find.word = !find.word;
                 research = true;
             }
-            KeyCode::Char('f') if ctrl => find.field = FindField::Query,
+            KeyCode::Char('f') if ctrl && !shift => find.field = FindField::Query,
             KeyCode::Char('r') if ctrl => {
                 find.replacing = true;
                 find.field = FindField::Replace;

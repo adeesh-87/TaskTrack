@@ -210,6 +210,8 @@ pub enum Popup {
     Palette(super::palette::Palette),
     /// Ctrl+P / Ctrl+O.
     Finder(Box<super::finder::Finder>),
+    /// Search in files (the state is `App::search`).
+    Search,
     /// Scrollable read-only text.
     Doc {
         /// Title.
@@ -312,6 +314,7 @@ impl Popup {
             Popup::Tickets { source, .. } => source,
             Popup::Palette(_) => "commands",
             Popup::Finder(f) => f.title(),
+            Popup::Search => "search in files",
             Popup::Checkpoints { .. } => "checkpoints",
             Popup::Help { .. } => "help",
         }

@@ -45,6 +45,24 @@ pub enum JobEvent {
         /// Whether pahiri waited for it (a log popup is showing).
         waited: bool,
     },
+    /// Search in files: the matches of one file.
+    SearchHits {
+        /// Search id.
+        id: u64,
+        /// The file's matches.
+        file: super::search::FileHits,
+    },
+    /// Search in files finished.
+    SearchDone {
+        /// Search id.
+        id: u64,
+        /// Files read.
+        searched: usize,
+        /// Stopped at the limit.
+        truncated: bool,
+        /// A bad glob.
+        error: Option<String>,
+    },
     /// The quick-open file index was built.
     FileIndex {
         /// Roots walked (label, folder).

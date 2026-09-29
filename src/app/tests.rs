@@ -2621,3 +2621,94 @@ fn quick_open_and_path_opener() {
         code.path().join("src")
     );
 }
+
+#[test]
+fn search_in_files_opens_results_and_f4_steps() {
+    let code = tempfile::tempdir().unwrap();
+    fs::create_dir_all(code.path().join("src")).unwrap();
+    fs::write(code.path().join("src/a.c"), "int x;\nfoo(x);\n  foo();\n").unwrap();
+    fs::write(code.path().join("src/b.h"), "void foo(void);\n").unwrap();
+    let dir = code.path().to_path_buf();
+    let mut h = Harness::build(true, move |cfg| {
+        cfg.workspaces = vec![Workspace {
+            name: "fw".into(),
+            path: dir.clone(),
+            main_branch: None,
+        }];
+        crate::tasks::context::update_meta(&cfg.tasks_dir.join("alpha/CONTEXT.md"), "alpha", |m| {
+            m.workspaces = vec!["fw".into()];
+        })
+        .unwrap();
+    });
+    fs::write(h.tasks.join("alpha/notes.md"), "foo in the notes\n").unwrap();
+    h.press(key(KeyCode::Enter));
+    h.press(key(KeyCode::Char('f')));
+    let ctrl_shift = |c| {
+        KeyEvent::new(
+            KeyCode::Char(c),
+            KeyModifiers::CONTROL | KeyModifiers::SHIFT,
+        )
+    };
+    h.press(ctrl_shift('F'));
+    assert!(matches!(h.app.popup(), Some(Popup::Search)));
+    h.type_str("foo");
+    h.press(key(KeyCode::Enter));
+    assert!(h.pump_until(|app| !app.search.as_ref().unwrap().running));
+    let labels = |h: &Harness| -> Vec<(String, usize)> {
+        let p = h.app.search.as_ref().unwrap();
+        p.files
+            .iter()
+            .map(|f| (f.label.clone(), f.hits.len()))
+            .collect()
+    };
+    assert_eq!(
+        labels(&h),
+        [
+            ("fw/src/a.c".to_owned(), 2),
+            ("fw/src/b.h".to_owned(), 1),
+            ("notes.md".to_owned(), 1)
+        ]
+    );
+    // Enter moved to the results; only *.c and *.h files, not the task folder.
+    assert_eq!(h.app.search.as_ref().unwrap().field, search::Field::Results);
+    h.press(key(KeyCode::Tab));
+    h.press(key(KeyCode::Tab));
+    h.type_str("*.c, *.h");
+    h.press(key(KeyCode::Tab));
+    h.press(key(KeyCode::Tab));
+    assert_eq!(h.app.search.as_ref().unwrap().field, search::Field::Roots);
+    h.press(key(KeyCode::Char(' ')));
+    assert!(!h.app.search.as_ref().unwrap().roots[0].on);
+    h.press(key(KeyCode::Enter));
+    assert!(h.pump_until(|app| !app.search.as_ref().unwrap().running));
+    assert_eq!(labels(&h).len(), 2);
+    let rows = screen(&mut h.app, 100, 30);
+    assert!(
+        rows.iter().any(|r| r.contains("fw/src/a.c (2)")),
+        "{rows:#?}"
+    );
+    // Enter on the second match opens its file with the match selected.
+    h.press(key(KeyCode::Down));
+    h.press(key(KeyCode::Down));
+    h.press(key(KeyCode::Enter));
+    assert!(h.app.popup().is_none());
+    let ed = h.ctx().editor.as_ref().unwrap();
+    assert!(ed.path().ends_with("src/a.c"));
+    assert_eq!(ed.selection(), Some(((2, 2), (2, 5))));
+    // F4 / Shift+F4 step through the results, across files and wrapping.
+    h.press(key(KeyCode::F(4)));
+    assert!(h.ctx().editor.as_ref().unwrap().path().ends_with("src/b.h"));
+    h.press(key(KeyCode::F(4)));
+    assert_eq!(
+        h.ctx().editor.as_ref().unwrap().selection(),
+        Some(((1, 0), (1, 3)))
+    );
+    h.press(KeyEvent::new(KeyCode::F(4), KeyModifiers::SHIFT));
+    assert!(h.ctx().editor.as_ref().unwrap().path().ends_with("src/b.h"));
+    // Ctrl+F in the file tree searches the selected folder only.
+    h.press(ctrl('b'));
+    h.press(ctrl('f'));
+    let p = h.app.search.as_ref().unwrap();
+    assert_eq!(p.scope.as_deref(), Some(code.path().join("src").as_path()));
+    assert_eq!(p.query, "foo", "the panel keeps its settings");
+}

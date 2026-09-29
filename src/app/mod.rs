@@ -12,6 +12,7 @@ pub mod finder;
 pub mod keymap;
 pub mod palette;
 pub mod popup;
+pub mod search;
 pub mod timer;
 pub mod ui_state;
 
@@ -184,6 +185,8 @@ pub struct App {
     find: Option<find::FindBar>,
     /// Files for quick open (Ctrl+P).
     file_index: finder::FileIndex,
+    /// Search in files (Ctrl+Shift+F), kept for F4.
+    search: Option<search::SearchPanel>,
 }
 
 impl App {
@@ -264,6 +267,7 @@ impl App {
             leader_table,
             find: None,
             file_index: finder::FileIndex::default(),
+            search: None,
         };
         app.config_mtime = app.config_file_mtime();
         if matches!(app.mode, Mode::Home) {
@@ -507,7 +511,7 @@ impl App {
     }
 
     fn handle_paste(&mut self, text: &str) {
-        if self.finder_paste(text) {
+        if self.finder_paste(text) || self.search_paste(text) {
             return;
         }
         match &mut self.popup {
@@ -1437,6 +1441,7 @@ impl App {
             Action::RecordOutcome => self.request_outcome(),
             Action::PushReview => self.request_git_job(gerrit::GitJob::Push),
             Action::Rebase => self.request_git_job(gerrit::GitJob::Rebase),
+            Action::SearchFiles => self.open_search(None),
             Action::Find => {
                 if let Some(ctx) = self.active_context_mut() {
                     if ctx.editor.is_some() {
@@ -1682,6 +1687,13 @@ impl App {
                 files,
                 truncated,
             } => self.index_built(&roots, files, truncated),
+            JobEvent::SearchHits { id, file } => self.search_hits(id, file),
+            JobEvent::SearchDone {
+                id,
+                searched,
+                truncated,
+                error,
+            } => self.search_done(id, searched, truncated, error),
             JobEvent::Finished(line) => {
                 if let Some(Popup::Log { lines, done, .. }) = &mut self.popup {
                     lines.push(String::new());
@@ -1870,6 +1882,10 @@ impl App {
                 self.run_action(Action::Help);
                 return;
             }
+            (KeyCode::F(4), m) if focus == Focus::Editor => {
+                self.search_step(!m.contains(KeyModifiers::SHIFT));
+                return;
+            }
             (KeyCode::F(3), m) if focus == Focus::Editor => {
                 self.find_step(!m.contains(KeyModifiers::SHIFT));
                 return;
@@ -1943,6 +1959,20 @@ impl App {
             }
             KeyCode::Char('e') if !shift => self.open_recent_menu(),
             KeyCode::Char('p') if !shift => self.open_quick_open(),
+            KeyCode::Char('f' | 'F') if shift => self.open_search(None),
+            // Ctrl+F in the file tree: search in the selected folder.
+            KeyCode::Char('f') if focus == Focus::Tree => {
+                let scope = ctx.tree.selected().map(|n| {
+                    if n.is_dir {
+                        n.path.clone()
+                    } else {
+                        n.path
+                            .parent()
+                            .map_or_else(|| n.path.clone(), Path::to_path_buf)
+                    }
+                });
+                self.open_search(scope);
+            }
             KeyCode::Char('o') if !shift => self.open_path_prompt(),
             KeyCode::Char('g') if !shift && focus == Focus::Editor => {
                 let lines = ctx.editor.as_ref().map_or(0, |e| e.lines().len());
@@ -2639,6 +2669,7 @@ impl App {
         match popup {
             Popup::Message { .. } => {}
             Popup::Finder(f) => self.handle_finder_key(f, key),
+            Popup::Search => self.handle_search_key(key),
             Popup::Log {
                 title,
                 mut lines,

@@ -331,6 +331,8 @@ pub fn draw(frame: &mut Frame<'_>, popup: &Popup, area: Rect, theme: &Theme) {
             ));
             lines
         }
+        // Drawn by `search_view` (it needs the app's search state).
+        Popup::Search => return,
         Popup::Finder(f) => {
             title = format!(" {} ", f.title());
             cursor = Some((2 + f.query.chars().count() as u16, 0));
