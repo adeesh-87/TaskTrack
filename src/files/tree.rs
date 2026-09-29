@@ -19,6 +19,8 @@ pub struct Node {
     pub is_dir: bool,
     /// Whether the directory is currently expanded.
     pub expanded: bool,
+    /// An extra root (an attached workspace or build), shown by its label.
+    pub root: bool,
 }
 
 /// The tree state: root, expanded folders, flattened rows and the cursor.
@@ -31,6 +33,9 @@ pub struct FileTree {
     selected: usize,
     /// Modification times of the root and every expanded folder at the last refresh.
     dir_mtimes: Vec<(PathBuf, Option<SystemTime>)>,
+    /// More folders listed after the root's entries (label, path): the task's
+    /// attached code workspaces and builds.
+    extra: Vec<(String, PathBuf)>,
 }
 
 fn mtime(path: &Path) -> Option<SystemTime> {
@@ -47,6 +52,7 @@ impl FileTree {
             nodes: Vec::new(),
             selected: 0,
             dir_mtimes: Vec::new(),
+            extra: Vec::new(),
         };
         tree.refresh()?;
         Ok(tree)
@@ -55,6 +61,36 @@ impl FileTree {
     /// Root folder.
     pub fn root(&self) -> &Path {
         &self.root
+    }
+
+    /// Show these folders (label, path) after the root's entries.
+    pub fn set_extra_roots(&mut self, roots: Vec<(String, PathBuf)>) -> io::Result<()> {
+        if roots == self.extra {
+            return Ok(());
+        }
+        self.extra = roots;
+        self.refresh()
+    }
+
+    /// Every root: the task folder, then the extra ones.
+    pub fn roots(&self) -> Vec<(String, PathBuf)> {
+        let task = self
+            .root
+            .file_name()
+            .map_or_else(String::new, |n| n.to_string_lossy().into_owned());
+        std::iter::once((task, self.root.clone()))
+            .chain(self.extra.iter().cloned())
+            .collect()
+    }
+
+    /// The root `path` lives in (the deepest one), for file operations.
+    pub fn root_of(&self, path: &Path) -> &Path {
+        self.extra
+            .iter()
+            .map(|(_, p)| p.as_path())
+            .filter(|p| path.starts_with(p))
+            .max_by_key(|p| p.as_os_str().len())
+            .unwrap_or(&self.root)
     }
 
     /// Visible rows.
@@ -102,6 +138,20 @@ impl FileTree {
         let mut nodes = Vec::new();
         let root = self.root.clone();
         self.walk(&root, 0, &mut nodes)?;
+        for (label, path) in &self.extra {
+            let expanded = self.expanded.contains(path);
+            nodes.push(Node {
+                path: path.clone(),
+                name: label.clone(),
+                depth: 0,
+                is_dir: true,
+                expanded,
+                root: true,
+            });
+            if expanded {
+                let _ = self.walk(path, 1, &mut nodes);
+            }
+        }
         self.nodes = nodes;
         self.dir_mtimes = std::iter::once(root.clone())
             .chain(self.expanded.iter().cloned())
@@ -147,6 +197,7 @@ impl FileTree {
                 depth,
                 is_dir,
                 expanded,
+                root: false,
             });
             if expanded {
                 // A folder we cannot read simply renders as empty.
@@ -295,6 +346,33 @@ mod tests {
         assert_eq!(tree.target_dir(), dir.path().join("scripts"));
         tree.select_last();
         assert_eq!(tree.target_dir(), dir.path());
+    }
+
+    #[test]
+    fn extra_roots_follow_the_task_folder() {
+        let dir = fixture();
+        let code = tempfile::tempdir().unwrap();
+        fs::create_dir_all(code.path().join("src")).unwrap();
+        fs::write(code.path().join("src/main.c"), "int main;").unwrap();
+        let mut tree = FileTree::new(dir.path(), false).unwrap();
+        tree.set_extra_roots(vec![("fw · code".into(), code.path().to_path_buf())])
+            .unwrap();
+        let names: Vec<_> = tree.nodes().iter().map(|n| n.name.as_str()).collect();
+        assert_eq!(names, vec!["scripts", "CONTEXT.md", "fw · code"]);
+        assert!(tree.nodes()[2].root);
+        tree.select_last();
+        assert!(tree.toggle_selected().unwrap());
+        tree.select_next();
+        tree.expand_selected().unwrap();
+        tree.select_next();
+        let main = tree.selected().unwrap().path.clone();
+        assert!(main.ends_with("src/main.c"));
+        assert_eq!(tree.root_of(&main), code.path());
+        assert_eq!(tree.root_of(&dir.path().join("CONTEXT.md")), dir.path());
+        assert_eq!(tree.roots().len(), 2);
+        // Collapsing on a file inside the root walks up to its folder.
+        tree.collapse_selected().unwrap();
+        assert_eq!(tree.selected().unwrap().name, "src");
     }
 
     #[test]

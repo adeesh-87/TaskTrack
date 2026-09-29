@@ -7,6 +7,7 @@
 pub mod config_form;
 pub mod context;
 pub mod event;
+pub mod find;
 pub mod keymap;
 pub mod palette;
 pub mod popup;
@@ -178,8 +179,8 @@ pub struct App {
     session_saved: Instant,
     watched: Instant,
     leader_table: Vec<(char, LeaderCmd)>,
-    /// Last editor search.
-    search: Option<String>,
+    /// Find bar of the editor (Ctrl+F).
+    find: Option<find::FindBar>,
 }
 
 impl App {
@@ -258,7 +259,7 @@ impl App {
             session_saved: Instant::now(),
             watched: Instant::now(),
             leader_table,
-            search: None,
+            find: None,
         };
         app.config_mtime = app.config_file_mtime();
         if matches!(app.mode, Mode::Home) {
@@ -522,6 +523,9 @@ impl App {
             return;
         }
         if !matches!(self.mode, Mode::Task) {
+            return;
+        }
+        if self.find_has_keys() && self.find_paste(text) {
             return;
         }
         let Some(ctx) = self.active_context_mut() else {
@@ -1319,7 +1323,7 @@ impl App {
         let dirty = self
             .contexts
             .values()
-            .any(|c| c.editor.as_ref().is_some_and(Buffer::is_dirty));
+            .any(|c| c.dirty_buffers().next().is_some());
         if live > 0 || dirty {
             let mut parts = Vec::new();
             if live > 0 {
@@ -1427,34 +1431,13 @@ impl App {
             Action::PushReview => self.request_git_job(gerrit::GitJob::Push),
             Action::Rebase => self.request_git_job(gerrit::GitJob::Rebase),
             Action::Find => {
-                if self.active_context().is_some_and(|c| c.editor.is_some()) {
-                    self.popup = Some(Popup::input(
-                        "Find",
-                        "text to find in the open file (F3 / Ctrl+G: next)",
-                        self.search.clone().unwrap_or_default(),
-                        Pending::Find,
-                    ));
-                } else {
-                    self.set_status("open a file first");
+                if let Some(ctx) = self.active_context_mut() {
+                    if ctx.editor.is_some() {
+                        ctx.focus = Focus::Editor;
+                    }
                 }
+                self.open_find(false);
             }
-        }
-    }
-
-    /// Jump to the next match of the last search in the editor.
-    fn find_next(&mut self) {
-        let Some(term) = self.search.clone() else {
-            self.run_action(Action::Find);
-            return;
-        };
-        let height = self.editor_height;
-        let Some(ed) = self.active_context_mut().and_then(|c| c.editor.as_mut()) else {
-            return;
-        };
-        if ed.find_next(&term) {
-            ed.ensure_visible(height);
-        } else {
-            self.set_status(format!("not found: {term}"));
         }
     }
 
@@ -1840,6 +1823,18 @@ impl App {
             self.handle_terminal_key(key);
             return;
         }
+        // In the editor and the file tree, editor keys (Ctrl+B, Ctrl+Tab,
+        // Ctrl+P, …) win over the leader; the leader still works in the
+        // terminal and the shell list.
+        if focus == Focus::Editor && !self.leader_pending && self.handle_find_key(key) {
+            return;
+        }
+        if matches!(focus, Focus::Editor | Focus::Tree)
+            && !self.leader_pending
+            && self.handle_workspace_key(key, focus)
+        {
+            return;
+        }
         if self.leader_pending {
             self.leader_pending = false;
             self.handle_leader_command(key);
@@ -1863,23 +1858,28 @@ impl App {
                 self.run_action(Action::Help);
                 return;
             }
-            (KeyCode::F(3), _) | (KeyCode::Char('g'), KeyModifiers::CONTROL)
-                if focus == Focus::Editor =>
-            {
-                self.find_next();
+            (KeyCode::F(3), m) if focus == Focus::Editor => {
+                self.find_step(!m.contains(KeyModifiers::SHIFT));
                 return;
             }
             (KeyCode::Char('f'), KeyModifiers::CONTROL) if focus == Focus::Editor => {
-                self.run_action(Action::Find);
+                self.open_find(false);
                 return;
             }
-            (KeyCode::Tab, m) if m.is_empty() => {
+            (KeyCode::Char('r'), KeyModifiers::CONTROL) if focus == Focus::Editor => {
+                self.open_find(true);
+                return;
+            }
+            // In the editor Tab / Shift+Tab indent; elsewhere they move between panes.
+            (KeyCode::Tab, m) if m.is_empty() && focus != Focus::Editor => {
                 if let Some(ctx) = self.active_context_mut() {
                     ctx.cycle_focus(true);
                 }
                 return;
             }
-            (KeyCode::BackTab, _) => {
+            (KeyCode::BackTab, m)
+                if !m.contains(KeyModifiers::CONTROL) && focus != Focus::Editor =>
+            {
                 if let Some(ctx) = self.active_context_mut() {
                     ctx.cycle_focus(false);
                 }
@@ -1895,19 +1895,106 @@ impl App {
         }
     }
 
-    /// Ctrl+Tab / Ctrl+Shift+Tab (kitty protocol) and Alt+] / Alt+[ cycle panes;
+    /// Keys of the editor and the file tree that act on files (not on text).
+    /// Returns whether the key was used.
+    fn handle_workspace_key(&mut self, key: KeyEvent, focus: Focus) -> bool {
+        let ctrl = key.modifiers.contains(KeyModifiers::CONTROL);
+        let shift = key.modifiers.contains(KeyModifiers::SHIFT);
+        let alt = key.modifiers.contains(KeyModifiers::ALT);
+        let Some(ctx) = self.active_context_mut() else {
+            return false;
+        };
+        let cycle_key = ctrl && matches!(key.code, KeyCode::Tab | KeyCode::BackTab);
+        if !cycle_key {
+            ctx.end_cycle();
+        }
+        if !ctrl || alt {
+            return false;
+        }
+        match key.code {
+            KeyCode::Char('b' | 'B') if !shift => {
+                if focus == Focus::Editor {
+                    ctx.focus = Focus::Tree;
+                    if let Some(p) = ctx.editor.as_ref().map(|e| e.path().to_path_buf()) {
+                        ctx.tree.select_path(&p);
+                    }
+                } else if ctx.editor.is_some() {
+                    ctx.focus = Focus::Editor;
+                }
+            }
+            KeyCode::Tab | KeyCode::BackTab => {
+                let forward = key.code == KeyCode::Tab && !shift;
+                match ctx.cycle_files(forward) {
+                    Some(_) => ctx.focus = Focus::Editor,
+                    None => self.set_status("no other open file · Ctrl+P opens one"),
+                }
+            }
+            KeyCode::Char('e') if !shift => self.open_recent_menu(),
+            KeyCode::Char('g') if !shift && focus == Focus::Editor => {
+                let lines = ctx.editor.as_ref().map_or(0, |e| e.lines().len());
+                self.popup = Some(Popup::input(
+                    "Go to line",
+                    format!("line, or line:column (1–{lines})"),
+                    "",
+                    Pending::GotoLine,
+                ));
+            }
+            _ => return false,
+        }
+        true
+    }
+
+    /// Ctrl+E: the open files, most recent first.
+    fn open_recent_menu(&mut self) {
+        let Some(ctx) = self.active_context() else {
+            return;
+        };
+        let choices: Vec<Choice> = ctx
+            .editor
+            .iter()
+            .chain(&ctx.recent)
+            .map(|b| {
+                let root = ctx.tree.root_of(b.path());
+                let rel = b.path().strip_prefix(root).unwrap_or(b.path());
+                let shown = if root == ctx.tree.root() {
+                    rel.display().to_string()
+                } else {
+                    format!(
+                        "{}/{}",
+                        root.file_name()
+                            .map_or_else(String::new, |n| n.to_string_lossy().into_owned()),
+                        rel.display()
+                    )
+                };
+                Choice {
+                    label: format!("{}{shown}", if b.is_dirty() { "● " } else { "  " }),
+                    pending: Pending::SwitchFile(b.path().to_path_buf()),
+                }
+            })
+            .collect();
+        if choices.is_empty() {
+            self.set_status("no open files · Ctrl+P opens one");
+            return;
+        }
+        self.popup = Some(Popup::choose("Open files (● unsaved)", choices));
+    }
+
+    /// Alt+] / Alt+[ (and Ctrl+Tab outside the editor and
+    /// the file tree) cycle panes;
     /// Ctrl+N / Alt+N focus shell N. Returns `Some(true)` when consumed.
     fn handle_pane_keys(&mut self, key: KeyEvent) -> Option<bool> {
         let ctrl = key.modifiers.contains(KeyModifiers::CONTROL);
         let alt = key.modifiers.contains(KeyModifiers::ALT);
         let shift = key.modifiers.contains(KeyModifiers::SHIFT);
         let ctx = self.active_context_mut()?;
+        // In the editor and the file tree Ctrl+Tab switches files instead.
+        let files = matches!(ctx.focus, Focus::Editor | Focus::Tree);
         match key.code {
-            KeyCode::Tab if ctrl => {
+            KeyCode::Tab if ctrl && !files => {
                 ctx.cycle_focus(!shift);
                 Some(true)
             }
-            KeyCode::BackTab if ctrl => {
+            KeyCode::BackTab if ctrl && !files => {
                 ctx.cycle_focus(false);
                 Some(true)
             }
@@ -1934,7 +2021,12 @@ impl App {
         let Some(ctx) = self.active_context_mut() else {
             return;
         };
-        let root = ctx.tree.root().to_path_buf();
+        // The folder file operations act in: the task folder or the attached
+        // workspace / build the selection is in.
+        let root = ctx.tree.selected().map_or_else(
+            || ctx.tree.root().to_path_buf(),
+            |n| ctx.tree.root_of(&n.path).to_path_buf(),
+        );
         let mut next = Next::None;
         let result: std::io::Result<()> = match (key.code, key.modifiers) {
             (KeyCode::Down, _) | (KeyCode::Char('j'), _) => {
@@ -1953,8 +2045,8 @@ impl App {
                 ctx.tree.select_last();
                 Ok(())
             }
-            (KeyCode::Right, _) | (KeyCode::Char('l'), _) => ctx.tree.expand_selected(),
-            (KeyCode::Left, _) | (KeyCode::Char('h'), _) => ctx.tree.collapse_selected(),
+            (KeyCode::Right | KeyCode::Char('l' | '+' | '='), _) => ctx.tree.expand_selected(),
+            (KeyCode::Left | KeyCode::Char('h' | '-'), _) => ctx.tree.collapse_selected(),
             (KeyCode::Enter, _) => match ctx.tree.toggle_selected() {
                 Ok(true) => Ok(()),
                 Ok(false) => {
@@ -1967,7 +2059,12 @@ impl App {
             },
             (KeyCode::Char('.'), _) => ctx.tree.toggle_hidden(),
             (KeyCode::Char('r'), KeyModifiers::NONE) | (KeyCode::F(2), _) => {
-                if let Some(node) = ctx.tree.selected() {
+                if ctx.tree.selected().is_some_and(|n| n.root) {
+                    next = Next::Status(
+                        "an attached workspace or build: rename it on disk and in the settings"
+                            .into(),
+                    );
+                } else if let Some(node) = ctx.tree.selected() {
                     next = Next::Popup(Popup::input(
                         "Rename",
                         "new name",
@@ -2049,20 +2146,13 @@ impl App {
         }
     }
 
+    /// Show `path` in the editor: from the open files if it is one of them
+    /// (unsaved changes and all), else read it. The file shown before stays open.
     fn request_open_file(&mut self, path: &Path) {
-        if let Some(ed) = self.active_context().and_then(|c| c.editor.as_ref()) {
-            if ed.path() == path {
-                if let Some(ctx) = self.active_context_mut() {
-                    ctx.focus = Focus::Editor;
-                }
-                return;
-            }
-            if ed.is_dirty() {
-                self.popup = Some(Popup::confirm(
-                    "Discard changes?",
-                    format!("{} has unsaved changes.", ed.path().display()),
-                    Pending::OpenDiscard(path.to_path_buf()),
-                ));
+        if let Some(ctx) = self.active_context_mut() {
+            if ctx.activate_recent(path) {
+                ctx.focus = Focus::Editor;
+                ctx.zoomed = false;
                 return;
             }
         }
@@ -2089,10 +2179,16 @@ impl App {
     }
 
     fn open_file(&mut self, path: &Path) {
+        if let Some(ctx) = self.active_context_mut() {
+            if ctx.activate_recent(path) {
+                ctx.focus = Focus::Editor;
+                return;
+            }
+        }
         match Buffer::open(path) {
             Ok(buffer) => {
                 if let Some(ctx) = self.active_context_mut() {
-                    ctx.editor = Some(buffer);
+                    ctx.show_buffer(buffer);
                     ctx.focus = Focus::Editor;
                     ctx.zoomed = false;
                 }
@@ -2126,6 +2222,7 @@ impl App {
             match std::fs::write(ed.path(), &m) {
                 Ok(()) => {
                     ed.replace_saved(&m);
+                    ed.mark_disk_seen();
                     let _ = ctx.tree.refresh();
                     let _ = ctx.reload_meta();
                     Next::Status("Saved · merged pahiri's changes made while you edited".into())
@@ -2164,13 +2261,13 @@ impl App {
                 Pending::CloseEditorDiscard,
             ));
         } else {
-            ctx.editor = None;
-            ctx.focus = Focus::Tree;
+            ctx.close_active();
         }
     }
 
     fn handle_editor_key(&mut self, key: KeyEvent) {
         let height = self.editor_height;
+        let tab_width = usize::from(self.config.tab_width.max(1));
         let ctrl = key.modifiers.contains(KeyModifiers::CONTROL);
         let alt = key.modifiers.contains(KeyModifiers::ALT);
         let shift = key.modifiers.contains(KeyModifiers::SHIFT);
@@ -2257,10 +2354,11 @@ impl App {
                 ed.delete_word_right();
             }
             (KeyCode::Char('d'), KeyModifiers::ALT) => ed.delete_word_right(),
-            (KeyCode::Enter, _) => ed.insert_newline(),
+            (KeyCode::Enter, _) => ed.insert_newline_indented(&ed.indent_unit(tab_width)),
             (KeyCode::Backspace, _) => ed.backspace(),
             (KeyCode::Delete, _) => ed.delete(),
-            (KeyCode::Tab, _) => ed.insert_char('\t'),
+            (KeyCode::Tab, _) => ed.indent(&ed.indent_unit(tab_width)),
+            (KeyCode::BackTab, _) => ed.outdent(&ed.indent_unit(tab_width)),
             (KeyCode::Char(c), m)
                 if !m.contains(KeyModifiers::CONTROL) && !m.contains(KeyModifiers::ALT) =>
             {
@@ -2925,8 +3023,28 @@ impl App {
             Pending::OpenDiscard(path) => self.probe_and_open(&path),
             Pending::CloseEditorDiscard => {
                 if let Some(ctx) = self.active_context_mut() {
-                    ctx.editor = None;
-                    ctx.focus = Focus::Tree;
+                    ctx.close_active();
+                }
+            }
+            Pending::SwitchFile(path) => self.request_open_file(&path),
+            Pending::GotoLine => {
+                let text = input.unwrap_or_default();
+                let mut parts = text.trim().split([':', ',', ' ']);
+                let line = parts.next().and_then(|l| l.trim().parse::<usize>().ok());
+                let col = parts
+                    .next()
+                    .and_then(|c| c.trim().parse::<usize>().ok())
+                    .unwrap_or(1);
+                let height = self.editor_height;
+                match (
+                    line,
+                    self.active_context_mut().and_then(|c| c.editor.as_mut()),
+                ) {
+                    (Some(l), Some(ed)) => {
+                        ed.goto(l, col);
+                        ed.set_scroll(ed.cursor().0.saturating_sub(height / 3));
+                    }
+                    _ => self.set_status(format!("not a line number: {text}")),
                 }
             }
             Pending::Rename(path) => {
@@ -3033,12 +3151,6 @@ impl App {
                     }
                 }
             }
-            Pending::Find => {
-                if let Some(term) = input {
-                    self.search = Some(term);
-                    self.find_next();
-                }
-            }
         }
     }
 
@@ -3050,7 +3162,10 @@ impl App {
         let Some(ctx) = self.active_context_mut() else {
             return;
         };
-        let root = ctx.tree.root().to_path_buf();
+        let root = ctx.tree.selected().map_or_else(
+            || ctx.tree.root().to_path_buf(),
+            |n| ctx.tree.root_of(&n.path).to_path_buf(),
+        );
         match op(&root) {
             Ok(created) => {
                 let _ = ctx.tree.refresh();

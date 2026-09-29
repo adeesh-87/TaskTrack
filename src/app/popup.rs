@@ -76,14 +76,16 @@ pub enum Pending {
     OpenTask(String),
     /// Replace the task's `## Description` with this text.
     RefreshDescription(String, String),
-    /// Search the editor for the entered text.
-    Find,
     /// Leave the Plan view without saving.
     PlanDiscard,
     /// Stop the timer and start it on plan item N.
     PlanStart(usize),
     /// Run the hook configured for this event now.
     RunHook(String),
+    /// Show this open file (Ctrl+E).
+    SwitchFile(std::path::PathBuf),
+    /// Move the cursor to the entered line[:column].
+    GotoLine,
     /// Apply the ticked audit proposals.
     AuditApply,
     /// Leave the Audit view without applying.

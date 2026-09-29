@@ -42,6 +42,56 @@ pub struct Buffer {
     batching: bool,
     /// Selection anchor: the selection runs from here to the cursor.
     anchor: Option<(usize, usize)>,
+    /// The file had Windows line endings; they are written back.
+    crlf: bool,
+    /// Modification time of the file when last read or written.
+    disk_mtime: Option<std::time::SystemTime>,
+    /// Indentation the file uses, when it shows one: a tab or N spaces.
+    indent: Option<String>,
+}
+
+fn file_mtime(path: &Path) -> Option<std::time::SystemTime> {
+    fs::metadata(path).and_then(|m| m.modified()).ok()
+}
+
+/// The indentation a file uses: a tab (Makefiles always), or the most common
+/// step of leading spaces (2, 3, 4 or 8); `None` when it does not show.
+pub fn detect_indent(lines: &[String], path: &Path) -> Option<String> {
+    let name = path
+        .file_name()
+        .map_or_else(String::new, |n| n.to_string_lossy().into_owned());
+    if matches!(name.as_str(), "Makefile" | "makefile" | "GNUmakefile")
+        || path
+            .extension()
+            .is_some_and(|e| e.eq_ignore_ascii_case("mk"))
+    {
+        return Some("\t".into());
+    }
+    let (mut tabs, mut spaced) = (0usize, 0usize);
+    let mut steps = [0usize; 9];
+    let mut prev = 0usize;
+    for line in lines.iter().filter(|l| !l.trim().is_empty()).take(4000) {
+        if line.starts_with('\t') {
+            tabs += 1;
+            continue;
+        }
+        let n = line.chars().take_while(|c| *c == ' ').count();
+        if n > 0 {
+            spaced += 1;
+        }
+        if n > prev && n - prev < steps.len() {
+            steps[n - prev] += 1;
+        }
+        prev = n;
+    }
+    if tabs > spaced {
+        return Some("\t".into());
+    }
+    [2usize, 3, 4, 8]
+        .into_iter()
+        .filter(|w| steps[*w] > 0)
+        .max_by_key(|w| (steps[*w], *w))
+        .map(|w| " ".repeat(w))
 }
 
 /// Character classes for word-wise movement.
@@ -75,10 +125,19 @@ impl Buffer {
 
     /// Build a buffer from text (used by tests and for read-only views).
     pub fn from_text(path: &Path, text: &str, read_only: bool) -> Self {
+        let crlf = text.contains("\r\n");
+        let normalized;
+        let text = if crlf {
+            normalized = text.replace("\r\n", "\n");
+            normalized.as_str()
+        } else {
+            text
+        };
         let mut lines: Vec<String> = text.lines().map(str::to_owned).collect();
         if lines.is_empty() || text.ends_with('\n') {
             lines.push(String::new());
         }
+        let indent = detect_indent(&lines, path);
         Self {
             path: path.to_path_buf(),
             lines,
@@ -93,7 +152,35 @@ impl Buffer {
             last_edit: None,
             batching: false,
             anchor: None,
+            crlf,
+            disk_mtime: file_mtime(path),
+            indent,
         }
+    }
+
+    /// The indentation to insert: the file's own, else `default_width` spaces.
+    pub fn indent_unit(&self, default_width: usize) -> String {
+        self.indent
+            .clone()
+            .unwrap_or_else(|| " ".repeat(default_width.max(1)))
+    }
+
+    /// Whether the file changed on disk since it was read or saved.
+    pub fn changed_on_disk(&self) -> bool {
+        self.disk_mtime.is_some() && file_mtime(&self.path) != self.disk_mtime
+    }
+
+    /// Take the current state on disk as seen (without reloading).
+    pub fn mark_disk_seen(&mut self) {
+        self.disk_mtime = file_mtime(&self.path);
+    }
+
+    /// Read the file again (keeping the cursor; undo can go back).
+    pub fn reload(&mut self) -> io::Result<()> {
+        let text = fs::read_to_string(&self.path)?;
+        self.replace_saved(&text);
+        self.mark_disk_seen();
+        Ok(())
     }
 
     /// Text as last loaded or saved (the merge base for [`crate::tasks::merge`]).
@@ -105,6 +192,8 @@ impl Buffer {
     /// save). Keeps the cursor where possible; undo history is kept.
     pub fn replace_saved(&mut self, text: &str) {
         self.push_undo(EditKind::Other);
+        let normalized = text.replace("\r\n", "\n");
+        let text = normalized.as_str();
         let mut lines: Vec<String> = text.lines().map(str::to_owned).collect();
         if lines.is_empty() || text.ends_with('\n') {
             lines.push(String::new());
@@ -171,39 +260,6 @@ impl Buffer {
         true
     }
 
-    /// Move the cursor to the next case-insensitive match of `needle` after the
-    /// cursor (wrapping). Returns whether one was found.
-    pub fn find_next(&mut self, needle: &str) -> bool {
-        let needle = needle.to_lowercase();
-        if needle.is_empty() {
-            return false;
-        }
-        self.anchor = None;
-        let n = self.lines.len();
-        let (row, col) = self.cursor;
-        for step in 0..=n {
-            let r = (row + step) % n;
-            let line = self.lines[r].to_lowercase();
-            let from = if step == 0 { col + 1 } else { 0 };
-            let start_byte = Self::byte_index(&line, from.min(line.chars().count()));
-            if step == n && from == 0 {
-                break;
-            }
-            if let Some(i) = line[start_byte..].find(&needle) {
-                let char_col = line[..start_byte + i].chars().count();
-                self.cursor = (r, char_col);
-                return true;
-            }
-        }
-        // Wrapped all the way: a match at or before the cursor on its own line.
-        let line = self.lines[row].to_lowercase();
-        if let Some(i) = line.find(&needle) {
-            self.cursor = (row, line[..i].chars().count());
-            return true;
-        }
-        false
-    }
-
     /// Set the first visible line.
     pub fn set_scroll(&mut self, scroll: usize) {
         self.scroll = scroll.min(self.lines.len().saturating_sub(1));
@@ -215,6 +271,15 @@ impl Buffer {
             text.push('\n');
         }
         text
+    }
+
+    /// `text` with the file's own line endings.
+    fn with_eol(&self, text: String) -> String {
+        if self.crlf {
+            text.replace('\n', "\r\n")
+        } else {
+            text
+        }
     }
 
     /// File backing this buffer.
@@ -497,10 +562,11 @@ impl Buffer {
             ));
         }
         let text = self.text_for_disk();
-        fs::write(&self.path, &text)?;
+        fs::write(&self.path, self.with_eol(text.clone()))?;
         self.base = text;
         self.dirty = false;
         self.last_edit = None;
+        self.mark_disk_seen();
         Ok(())
     }
 
@@ -641,6 +707,158 @@ impl Buffer {
         }
         self.batching = false;
         self.last_edit = Some(EditKind::Other);
+    }
+
+    /// Enter in code: split the line and keep its indentation, one more level
+    /// after an opening bracket; between `{` and `}` the closing one moves to
+    /// its own line.
+    pub fn insert_newline_indented(&mut self, unit: &str) {
+        if self.read_only {
+            return;
+        }
+        if !self.delete_selection_step() {
+            self.push_undo(EditKind::Other);
+        }
+        let (row, col) = self.cursor;
+        let line = &self.lines[row];
+        let idx = Self::byte_index(line, col);
+        let lead: String = line[..idx]
+            .chars()
+            .take_while(|c| *c == ' ' || *c == '\t')
+            .collect();
+        let opens = matches!(line[..idx].trim_end().chars().last(), Some('{' | '(' | '['));
+        let rest = self.lines[row].split_off(idx);
+        let rest = rest.trim_start().to_owned();
+        let closes = opens && matches!(rest.chars().next(), Some('}' | ')' | ']'));
+        let inner = if opens {
+            format!("{lead}{unit}")
+        } else {
+            lead.clone()
+        };
+        let cursor_col = inner.chars().count();
+        if closes {
+            self.lines.insert(row + 1, inner);
+            self.lines.insert(row + 2, format!("{lead}{rest}"));
+        } else {
+            self.lines.insert(row + 1, format!("{inner}{rest}"));
+        }
+        self.cursor = (row + 1, cursor_col);
+        self.dirty = true;
+        self.revision += 1;
+    }
+
+    /// Tab: indent the selected lines, or insert indentation at the cursor
+    /// (spaces up to the next stop).
+    pub fn indent(&mut self, unit: &str) {
+        if self.read_only {
+            return;
+        }
+        match self.selection() {
+            Some((a, b)) if a.0 != b.0 => self.shift_lines(a, b, true, unit),
+            _ if unit == "\t" => self.insert_char('\t'),
+            _ => {
+                let w = unit.len().max(1);
+                let (row, col) = self.cursor;
+                let disp = display_col(&self.lines[row], col, w);
+                self.insert_str(&" ".repeat(w - disp % w));
+            }
+        }
+    }
+
+    /// Shift+Tab: remove one level of indentation from the selected lines (or
+    /// the cursor's line).
+    pub fn outdent(&mut self, unit: &str) {
+        if self.read_only {
+            return;
+        }
+        let (a, b) = self.selection().unwrap_or((self.cursor, self.cursor));
+        self.shift_lines(a, b, false, unit);
+    }
+
+    /// Indent or outdent lines `a.0..=b.0` (not `b`'s line when the selection
+    /// ends at its start), keeping cursor and selection on the same text.
+    fn shift_lines(&mut self, a: (usize, usize), b: (usize, usize), indent: bool, unit: &str) {
+        let last = if b.0 > a.0 && b.1 == 0 { b.0 - 1 } else { b.0 };
+        let width = if unit == "\t" { 1 } else { unit.len().max(1) };
+        let mut deltas = Vec::new();
+        for row in a.0..=last {
+            let line = &self.lines[row];
+            let delta: i64 = if indent {
+                if line.is_empty() {
+                    0
+                } else {
+                    unit.chars().count() as i64
+                }
+            } else if line.starts_with('\t') {
+                -1
+            } else {
+                -(line.chars().take(width).take_while(|c| *c == ' ').count() as i64)
+            };
+            deltas.push((row, delta));
+        }
+        if deltas.iter().all(|(_, d)| *d == 0) {
+            return;
+        }
+        self.push_undo(EditKind::Other);
+        for &(row, delta) in &deltas {
+            let line = &mut self.lines[row];
+            if delta > 0 {
+                line.insert_str(0, unit);
+            } else if delta < 0 {
+                line.drain(..(-delta) as usize);
+            }
+        }
+        // Positions move with their text; a line start stays at the start, so
+        // a selection from column 0 grows to take the new indentation in.
+        let shift = |(r, c): (usize, usize)| {
+            let d = deltas
+                .iter()
+                .find(|(row, _)| *row == r)
+                .map_or(0, |(_, d)| *d);
+            if d > 0 && c == 0 {
+                (r, 0)
+            } else {
+                (r, (c as i64 + d).max(0) as usize)
+            }
+        };
+        let (cursor, anchor) = (shift(self.cursor), self.anchor.map(shift));
+        self.cursor = cursor;
+        self.anchor = anchor;
+        self.set_cursor(self.cursor.0, self.cursor.1);
+        self.dirty = true;
+        self.revision += 1;
+    }
+
+    /// Replace char ranges `(row, start, end, text)` on single lines, all as
+    /// one undo step. Ranges must not overlap. Returns how many were replaced.
+    pub fn replace_ranges(&mut self, edits: &[(usize, usize, usize, String)]) -> usize {
+        if self.read_only || edits.is_empty() {
+            return 0;
+        }
+        self.push_undo(EditKind::Other);
+        let mut sorted: Vec<&(usize, usize, usize, String)> = edits.iter().collect();
+        sorted.sort_by(|a, b| (b.0, b.1).cmp(&(a.0, a.1)));
+        let mut n = 0;
+        for (row, start, end, text) in sorted {
+            let Some(line) = self.lines.get_mut(*row) else {
+                continue;
+            };
+            let s = Self::byte_index(line, *start);
+            let e = Self::byte_index(line, *end);
+            line.replace_range(s..e, text);
+            n += 1;
+        }
+        self.anchor = None;
+        self.dirty = true;
+        self.revision += 1;
+        self.set_cursor(self.cursor.0, self.cursor.1);
+        n
+    }
+
+    /// Put the cursor on `line` (1-based) and `col` (1-based), clamped.
+    pub fn goto(&mut self, line: usize, col: usize) {
+        self.anchor = None;
+        self.set_cursor(line.saturating_sub(1), col.saturating_sub(1));
     }
 
     /// Split the line at the cursor.
@@ -923,21 +1141,6 @@ mod tests {
     }
 
     #[test]
-    fn find_wraps_and_is_case_insensitive() {
-        let mut b = buf("alpha\nBeta beta\ngamma");
-        assert!(b.find_next("beta"));
-        assert_eq!(b.cursor(), (1, 0));
-        assert!(b.find_next("beta"));
-        assert_eq!(b.cursor(), (1, 5));
-        assert!(b.find_next("BETA"));
-        assert_eq!(b.cursor(), (1, 0));
-        assert!(b.find_next("alp"));
-        assert_eq!(b.cursor(), (0, 0));
-        assert!(!b.find_next("zzz"));
-        assert!(!b.find_next(""));
-    }
-
-    #[test]
     fn replace_saved_keeps_cursor_and_base() {
         let mut b = buf("a\nb\n");
         b.set_cursor(1, 1);
@@ -1044,6 +1247,95 @@ mod tests {
         assert_eq!(b.cut(), None);
         b.delete_word_left();
         assert_eq!(b.text(), "keep me");
+    }
+
+    #[test]
+    fn indentation_is_detected_and_used() {
+        let tabs = buf("int f() {\n\treturn 0;\n}\n");
+        assert_eq!(tabs.indent_unit(4), "\t");
+        let four = buf("def f():\n    if x:\n        y\n    z\n");
+        assert_eq!(four.indent_unit(8), "    ");
+        let two = buf("a:\n  b:\n    c\n  d\n");
+        assert_eq!(two.indent_unit(8), "  ");
+        assert_eq!(
+            buf("plain\ntext\n").indent_unit(3),
+            "   ",
+            "the setting when unknown"
+        );
+        let make = Buffer::from_text(Path::new("/x/Makefile"), "all:\n", false);
+        assert_eq!(make.indent_unit(4), "\t");
+        let c = buf("/**\n * doc\n */\nint x;\n");
+        assert_eq!(
+            c.indent_unit(4),
+            "    ",
+            "doc comment stars are not indentation"
+        );
+    }
+
+    #[test]
+    fn enter_keeps_indentation_and_opens_blocks() {
+        let mut b = buf("    if (x) {}");
+        b.set_cursor(0, 12); // between { and }
+        b.insert_newline_indented("    ");
+        assert_eq!(b.lines(), &["    if (x) {", "        ", "    }"]);
+        assert_eq!(b.cursor(), (1, 8));
+        b.insert_str("y();");
+        b.insert_newline_indented("    ");
+        assert_eq!(b.lines()[2], "        ");
+        assert!(b.undo());
+        assert_eq!(b.lines()[1], "        y();");
+        let mut t = buf("\tcall(a,");
+        t.end();
+        t.insert_newline_indented("\t");
+        assert_eq!(t.lines(), &["\tcall(a,", "\t"]);
+    }
+
+    #[test]
+    fn tab_and_shift_tab_indent_lines_or_insert() {
+        let mut b = buf("ab\ncd\nef");
+        b.set_cursor(0, 1);
+        b.indent("    ");
+        assert_eq!(b.lines()[0], "a   b", "spaces up to the next stop");
+        b.select_range((0, 0), (1, 1));
+        b.indent("    ");
+        assert_eq!(b.lines(), &["    a   b", "    cd", "ef"]);
+        assert_eq!(b.selected_text().as_deref(), Some("    a   b\n    c"));
+        b.outdent("    ");
+        b.outdent("    ");
+        assert_eq!(b.lines(), &["a   b", "cd", "ef"]);
+        // A selection ending at a line start leaves that line alone.
+        b.select_range((1, 0), (2, 0));
+        b.indent("\t");
+        assert_eq!(b.lines(), &["a   b", "\tcd", "ef"]);
+        assert!(b.undo());
+        assert_eq!(b.lines()[1], "cd");
+        b.select(false);
+        b.goto(3, 2);
+        assert_eq!(b.cursor(), (2, 1));
+        b.goto(99, 99);
+        assert_eq!(b.cursor(), (2, 2));
+    }
+
+    #[test]
+    fn crlf_is_kept_and_outside_changes_are_seen() {
+        let dir = tempfile::tempdir().unwrap();
+        let p = dir.path().join("win.txt");
+        fs::write(&p, "one\r\ntwo\r\n").unwrap();
+        let mut b = Buffer::open(&p).unwrap();
+        assert_eq!(b.lines(), &["one", "two", ""]);
+        b.insert_str("zero ");
+        b.save().unwrap();
+        assert_eq!(fs::read_to_string(&p).unwrap(), "zero one\r\ntwo\r\n");
+        assert!(!b.changed_on_disk());
+        std::thread::sleep(std::time::Duration::from_millis(20));
+        fs::write(&p, "changed\n").unwrap();
+        let f = fs::File::options().write(true).open(&p).unwrap();
+        f.set_modified(std::time::SystemTime::now() + std::time::Duration::from_secs(2))
+            .unwrap();
+        assert!(b.changed_on_disk());
+        b.reload().unwrap();
+        assert_eq!(b.text(), "changed\n");
+        assert!(!b.changed_on_disk() && !b.is_dirty());
     }
 
     #[test]

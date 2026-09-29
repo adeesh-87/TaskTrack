@@ -104,7 +104,7 @@ pub fn delete(root: &Path, path: &Path) -> io::Result<()> {
     if path == root || !path.starts_with(root) {
         return Err(io::Error::new(
             io::ErrorKind::PermissionDenied,
-            "refusing to delete outside the task folder",
+            "refusing to delete a root folder or anything outside it",
         ));
     }
     if path.is_dir() {

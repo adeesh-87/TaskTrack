@@ -111,6 +111,9 @@ pub struct HighlightCache {
     pub states: Vec<State>,
 }
 
+/// Open files kept besides the shown one (clean ones beyond this are dropped).
+const MAX_RECENT: usize = 30;
+
 /// Everything pahiri remembers about an opened task while it runs.
 #[derive(Debug)]
 pub struct TaskContext {
@@ -128,8 +131,15 @@ pub struct TaskContext {
     pub shells: Vec<Shell>,
     /// Index of the selected shell.
     pub selected_shell: usize,
-    /// The one open document, if any.
+    /// The document shown in the editor, if any.
     pub editor: Option<Buffer>,
+    /// Other open documents, most recently used first (kept in memory with
+    /// their cursor, undo history and unsaved changes).
+    pub recent: Vec<Buffer>,
+    /// Ctrl+Tab in progress: the order when it started and the position shown.
+    cycle: Option<(Vec<PathBuf>, usize)>,
+    /// Cursor of files that were closed, to put it back when they reopen.
+    positions: std::collections::HashMap<PathBuf, (usize, usize)>,
     /// Focused pane.
     pub focus: Focus,
     /// Whether the terminal pane is shown (when there are shells).
@@ -166,6 +176,9 @@ impl TaskContext {
             shells: Vec::new(),
             selected_shell: 0,
             editor: None,
+            recent: Vec::new(),
+            cycle: None,
+            positions: std::collections::HashMap::new(),
             focus: Focus::Tree,
             show_shell: true,
             zoomed: false,
@@ -224,7 +237,137 @@ impl TaskContext {
     /// Rewrite the env file so open shells see the current attachments.
     pub fn refresh_env(&mut self, config: &Config, state_dir: &Path) -> io::Result<()> {
         self.env_file = Some(self.task_env(config).write(state_dir)?);
+        self.sync_roots(config);
         Ok(())
+    }
+
+    /// Show `buffer` in the editor; the one shown before goes on the stack.
+    pub fn show_buffer(&mut self, mut buffer: Buffer) {
+        self.end_cycle();
+        if let Some(&(row, col)) = self.positions.get(buffer.path()) {
+            buffer.set_cursor(row, col);
+        }
+        if let Some(cur) = self.editor.take() {
+            if cur.path() != buffer.path() {
+                self.recent.insert(0, cur);
+            }
+        }
+        self.recent.retain(|b| b.path() != buffer.path());
+        self.editor = Some(buffer);
+        // Forget the oldest clean files beyond the limit (never unsaved work).
+        while self.recent.len() > MAX_RECENT {
+            match self.recent.iter().rposition(|b| !b.is_dirty()) {
+                Some(i) => {
+                    let b = self.recent.remove(i);
+                    self.positions.insert(b.path().to_path_buf(), b.cursor());
+                }
+                None => break,
+            }
+        }
+    }
+
+    /// Show an open file from the stack. Returns whether it was open.
+    pub fn activate_recent(&mut self, path: &Path) -> bool {
+        if self.editor.as_ref().is_some_and(|e| e.path() == path) {
+            return true;
+        }
+        let Some(i) = self.recent.iter().position(|b| b.path() == path) else {
+            return false;
+        };
+        let b = self.recent.remove(i);
+        self.show_buffer(b);
+        true
+    }
+
+    /// Open files, most recently used first (the shown one first).
+    pub fn open_paths(&self) -> Vec<PathBuf> {
+        self.editor
+            .iter()
+            .chain(&self.recent)
+            .map(|b| b.path().to_path_buf())
+            .collect()
+    }
+
+    /// Open files with unsaved changes.
+    pub fn dirty_buffers(&self) -> impl Iterator<Item = &Buffer> {
+        self.editor
+            .iter()
+            .chain(&self.recent)
+            .filter(|b| b.is_dirty())
+    }
+
+    /// Close the shown file (without asking) and show the previous one.
+    pub fn close_active(&mut self) {
+        self.end_cycle();
+        if let Some(b) = self.editor.take() {
+            self.positions.insert(b.path().to_path_buf(), b.cursor());
+        }
+        if self.recent.is_empty() {
+            self.focus = Focus::Tree;
+        } else {
+            self.editor = Some(self.recent.remove(0));
+        }
+    }
+
+    /// Ctrl+Tab / Ctrl+Shift+Tab: show the next / previous file in
+    /// most-recently-used order. The order stays put until another key is
+    /// pressed ([`TaskContext::end_cycle`]), like an editor's tab switcher.
+    pub fn cycle_files(&mut self, forward: bool) -> Option<PathBuf> {
+        let (order, pos) = match self.cycle.take() {
+            Some(c) => c,
+            None => (self.open_paths(), 0),
+        };
+        if order.len() < 2 {
+            return None;
+        }
+        let n = order.len();
+        let pos = if forward {
+            (pos + 1) % n
+        } else {
+            (pos + n - 1) % n
+        };
+        let path = order[pos].clone();
+        if let Some(i) = self.recent.iter().position(|b| b.path() == path) {
+            let b = self.recent.remove(i);
+            if let Some(cur) = self.editor.replace(b) {
+                self.recent.push(cur);
+            }
+        }
+        self.cycle = Some((order, pos));
+        Some(path)
+    }
+
+    /// Finish a Ctrl+Tab cycle: the file shown becomes the most recent, the
+    /// rest keeps its order.
+    pub fn end_cycle(&mut self) {
+        let Some((order, _)) = self.cycle.take() else {
+            return;
+        };
+        let rank = |p: &Path| order.iter().position(|o| o == p).unwrap_or(usize::MAX);
+        self.recent.sort_by_key(|b| rank(b.path()));
+    }
+
+    /// Show the attached code workspaces and builds in the file tree.
+    pub fn sync_roots(&mut self, config: &Config) {
+        let workspaces = self
+            .meta
+            .workspaces
+            .iter()
+            .filter_map(|n| config.workspace(n))
+            .map(|w| (format!("{} · code", w.name), w.path.clone()));
+        let builds = self
+            .meta
+            .builds
+            .iter()
+            .filter_map(|n| config.build(n))
+            .map(|b| (format!("{} · build", b.name), b.path.clone()));
+        let roots = workspaces
+            .chain(builds)
+            .filter(|(_, p)| p.is_dir())
+            .collect();
+        if let Err(e) = self.tree.set_extra_roots(roots) {
+            tracing::warn!("file tree: {e}");
+        }
     }
 
     /// Launch a shell in the task folder and focus it.

@@ -277,6 +277,34 @@ impl App {
         if ctx.tree.changed_on_disk() {
             let _ = ctx.tree.refresh();
         }
+        // Open files changed by something else (git checkout, a build step, an
+        // agent): clean ones are reloaded; unsaved ones get a warning, once.
+        // CONTEXT.md merges on save instead (below).
+        let context_path = ctx.context_path.clone();
+        let mut note = None;
+        for ed in ctx.editor.iter_mut().chain(ctx.recent.iter_mut()) {
+            if ed.path() == context_path || !ed.changed_on_disk() {
+                continue;
+            }
+            let name = ed
+                .path()
+                .file_name()
+                .map_or_else(String::new, |n| n.to_string_lossy().into_owned());
+            if ed.is_dirty() {
+                ed.mark_disk_seen();
+                note = Some(format!(
+                    "{name} changed on disk while you have unsaved changes · Ctrl+S overwrites it, Ctrl+Z / Ctrl+W to drop yours"
+                ));
+            } else if ed.reload().is_ok() {
+                note.get_or_insert(format!("reloaded {name}: it changed on disk"));
+            }
+        }
+        if let Some(n) = note {
+            self.set_status(n);
+        }
+        let Some(ctx) = self.contexts.get_mut(&id) else {
+            return;
+        };
         if ctx.context_changed_on_disk() {
             let _ = ctx.reload_meta();
             self.reload_editor_if_context();
