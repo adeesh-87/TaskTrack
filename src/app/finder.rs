@@ -99,6 +99,12 @@ pub enum FinderKind {
     Files,
     /// Ctrl+O: complete a path.
     Path,
+    /// Ctrl+T: symbols of the workspace (language server or ctags).
+    Symbols,
+    /// Ctrl+Shift+O: symbols of the open file.
+    Outline,
+    /// Definitions or references to pick from.
+    Locations,
 }
 
 /// One row of the finder.
@@ -112,6 +118,24 @@ pub struct Item {
     pub path: PathBuf,
     /// A folder.
     pub dir: bool,
+    /// Line and char column to go to (symbols, references).
+    pub pos: Option<(usize, usize)>,
+    /// Shown after the label (kind, where).
+    pub detail: String,
+}
+
+impl Item {
+    /// A row for a place in a file.
+    pub fn at(label: String, path: PathBuf, pos: (usize, usize), detail: String) -> Self {
+        Self {
+            label,
+            marks: Vec::new(),
+            path,
+            dir: false,
+            pos: Some(pos),
+            detail,
+        }
+    }
 }
 
 /// The Ctrl+P / Ctrl+O popup.
@@ -129,6 +153,10 @@ pub struct Finder {
     pub note: String,
     /// Relative paths start here (Ctrl+O).
     pub base: PathBuf,
+    /// Every row, for finders that filter a fixed list (outline, locations).
+    pub all: Vec<Item>,
+    /// Title of a list of locations.
+    pub heading: String,
 }
 
 /// Whether a quick-open query is a regular expression (else fuzzy).
@@ -215,6 +243,8 @@ pub fn search_index(index: &FileIndex, query: &str) -> (Vec<Item>, String) {
             marks,
             path: index.full(i),
             dir: false,
+            pos: None,
+            detail: String::new(),
         })
         .collect();
     let plus = if index.truncated { "+" } else { "" };
@@ -227,6 +257,39 @@ pub fn search_index(index: &FileIndex, query: &str) -> (Vec<Item>, String) {
         items,
         format!("{mode} · {found} of {total}{plus} files{building}"),
     )
+}
+
+/// The rows of a fixed list that match `query` fuzzily (all when empty),
+/// best first.
+pub fn filter_items(all: &[Item], query: &str) -> Vec<Item> {
+    let query = query.trim();
+    if query.is_empty() {
+        return all.iter().take(MAX_SHOWN * 5).cloned().collect();
+    }
+    let pattern = Pattern::parse(query, CaseMatching::Smart, Normalization::Smart);
+    let mut matcher = Matcher::new(nucleo_matcher::Config::DEFAULT);
+    let mut buf = Vec::new();
+    let mut scored: Vec<(u32, usize, Vec<usize>)> = all
+        .iter()
+        .enumerate()
+        .filter_map(|(i, item)| {
+            let mut idx = Vec::new();
+            let hay = Utf32Str::new(&item.label, &mut buf);
+            let score = pattern.indices(hay, &mut matcher, &mut idx)?;
+            idx.sort_unstable();
+            idx.dedup();
+            Some((score, i, idx.into_iter().map(|n| n as usize).collect()))
+        })
+        .collect();
+    scored.sort_by(|a, b| b.0.cmp(&a.0).then(a.1.cmp(&b.1)));
+    scored
+        .into_iter()
+        .take(MAX_SHOWN)
+        .map(|(_, i, marks)| Item {
+            marks,
+            ..all[i].clone()
+        })
+        .collect()
 }
 
 /// Resolve a typed path: `~` expanded, relative ones under `base`.
@@ -281,6 +344,8 @@ pub fn list_path(typed: &str, base: &Path) -> (Vec<Item>, String) {
             marks,
             path: entry.path(),
             dir: is_dir,
+            pos: None,
+            detail: String::new(),
         });
     }
     let order = |a: &Item, b: &Item| b.dir.cmp(&a.dir).then_with(|| a.label.cmp(&b.label));
@@ -308,6 +373,11 @@ fn typed_path(path: &Path, dir: bool) -> String {
 }
 
 impl Finder {
+    /// A finder of `kind` starting with `query`.
+    pub fn new_kind(kind: FinderKind, query: String) -> Self {
+        Self::new(kind, query, PathBuf::new())
+    }
+
     fn new(kind: FinderKind, query: String, base: PathBuf) -> Self {
         Self {
             kind,
@@ -316,14 +386,19 @@ impl Finder {
             items: Vec::new(),
             note: String::new(),
             base,
+            all: Vec::new(),
+            heading: String::new(),
         }
     }
 
     /// Title of the popup.
-    pub fn title(&self) -> &'static str {
+    pub fn title(&self) -> &str {
         match self.kind {
             FinderKind::Files => "Open file",
             FinderKind::Path => "Open path",
+            FinderKind::Symbols => "Go to symbol",
+            FinderKind::Outline => "Symbols in this file",
+            FinderKind::Locations => &self.heading,
         }
     }
 
@@ -336,13 +411,16 @@ impl Finder {
             FinderKind::Path => {
                 "↑/↓ · Tab/Enter take the entry · Ctrl+Enter (Alt+Enter) open what is typed · Esc"
             }
+            FinderKind::Symbols | FinderKind::Outline | FinderKind::Locations => {
+                "type to filter · ↑/↓ · Enter go there (Alt+← comes back) · Esc"
+            }
         }
     }
 }
 
 impl App {
     /// The folders Ctrl+P searches: the task folder and its code workspaces.
-    fn index_roots(&self) -> Vec<(String, PathBuf)> {
+    pub(super) fn index_roots(&self) -> Vec<(String, PathBuf)> {
         let Some(ctx) = self.active_context() else {
             return Vec::new();
         };
@@ -463,7 +541,7 @@ impl App {
     }
 
     /// Recompute the rows after the query changed.
-    fn update_finder(&self, f: &mut Finder) {
+    pub(super) fn update_finder(&mut self, f: &mut Finder) {
         let (items, note) = match f.kind {
             FinderKind::Files if f.query.trim().chars().count() < MIN_QUERY => {
                 let recent = self.recent_files();
@@ -477,6 +555,12 @@ impl App {
             }
             FinderKind::Files => search_index(&self.file_index, &f.query),
             FinderKind::Path => list_path(&f.query, &f.base),
+            FinderKind::Symbols => self.symbol_rows(f),
+            FinderKind::Outline | FinderKind::Locations => {
+                let items = filter_items(&f.all, &f.query);
+                let note = format!("{} of {}", items.len(), f.all.len());
+                (items, note)
+            }
         };
         f.items = items;
         f.note = note;
@@ -504,6 +588,8 @@ impl App {
                     marks: Vec::new(),
                     path: p,
                     dir: false,
+                    pos: None,
+                    detail: String::new(),
                 }
             })
             .collect()
@@ -533,6 +619,17 @@ impl App {
             KeyCode::Enter if f.kind == FinderKind::Path && (ctrl || alt) => {
                 self.open_typed_path(&f);
                 return;
+            }
+            KeyCode::Enter
+                if matches!(
+                    f.kind,
+                    FinderKind::Symbols | FinderKind::Outline | FinderKind::Locations
+                ) =>
+            {
+                if let Some(item) = f.items.get(f.selected).cloned() {
+                    self.jump_to_item(&item);
+                    return;
+                }
             }
             KeyCode::Enter if f.kind == FinderKind::Files => {
                 let line = split_line(f.query.trim()).1;
@@ -651,11 +748,11 @@ impl App {
 fn delete_part(query: &mut String, kind: FinderKind) {
     let trimmed = match kind {
         FinderKind::Path => query.strip_suffix('/').unwrap_or(query),
-        FinderKind::Files => query.trim_end(),
+        _ => query.trim_end(),
     };
     let cut = match kind {
         FinderKind::Path => trimmed.rfind('/').map_or(0, |i| i + 1),
-        FinderKind::Files => trimmed.rfind([' ', '/']).map_or(0, |i| i + 1),
+        _ => trimmed.rfind([' ', '/', ':']).map_or(0, |i| i + 1),
     };
     query.truncate(cut);
 }

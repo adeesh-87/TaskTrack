@@ -25,6 +25,14 @@ Each recipe lists every place to touch. Run fmt, clippy and tests after.
   `handle_workspace_key`; they run before the leader there. Keys of the find
   bar and the completion list: `handle_find_key` (`find.rs`),
   `handle_completion_key` (`complete.rs`).
+- A palette command that must also work in `pahiri edit`: list it in
+  `Action::in_editor` (else the standalone editor refuses it).
+- A language-server request: in `src/app/lsp.rs` get `(server, params, path)`
+  from `lsp_here("<capability>Provider")`, `self.ask(server, "<method>",
+  &params, Ask::X { … })`, handle `Ask::X` in `lsp_answer`; parse the answer
+  in `src/lsp/mod.rs` with a unit test; extend `tests/fixtures/fake_lsp.py`
+  and the `language_server_answers_drive_the_editor` test. Keep a ctags
+  fallback when it makes sense.
 - After the leader key (terminal and shell list): add a `LeaderCmd` in `src/app/keymap.rs`
   (name, default key, description) and handle it in `handle_leader_command`.
 Prefer calling `self.run_action(Action::X)` so keys and palette stay in sync.

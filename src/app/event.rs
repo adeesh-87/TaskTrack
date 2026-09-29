@@ -45,6 +45,22 @@ pub enum JobEvent {
         /// Whether pahiri waited for it (a log popup is showing).
         waited: bool,
     },
+    /// A language server's message or exit.
+    Lsp {
+        /// Which server.
+        server: usize,
+        /// What happened.
+        event: crate::lsp::ServerEvent,
+    },
+    /// The ctags index was built.
+    Tags {
+        /// Folders indexed.
+        roots: Vec<(String, std::path::PathBuf)>,
+        /// Their tags.
+        tags: Vec<crate::lsp::ctags::Tag>,
+        /// What went wrong, if anything.
+        error: Option<String>,
+    },
     /// Search in files: the matches of one file.
     SearchHits {
         /// Search id.

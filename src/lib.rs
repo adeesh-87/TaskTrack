@@ -24,6 +24,7 @@ pub mod files;
 pub mod git;
 pub mod highlight;
 pub mod hooks;
+pub mod lsp;
 pub mod tasks;
 pub mod terminal;
 pub mod time;

@@ -97,6 +97,12 @@ pub enum FieldKey {
     IdleMinutes,
     /// Hooks, `event = command`.
     Hooks,
+    /// Start language servers.
+    LspEnabled,
+    /// Language servers, `language = command`.
+    LspServers,
+    /// ctags command.
+    Ctags,
     /// Hook timeout.
     HookTimeout,
     /// Minutes between `periodic` hook runs.
@@ -591,6 +597,30 @@ impl ConfigForm {
                 "Paste command",
                 "Ctrl+V in the editor pastes its output, e.g. wl-paste -n, xclip -o -selection clipboard, pbpaste. Empty: what pahiri copied last. The terminal's own paste always works.",
                 Value::Text(cfg.paste_command.clone()),
+            ),
+            field(
+                FieldKey::LspEnabled,
+                "Language servers",
+                "Start language servers (clangd, …) for open files: F12 definition, Shift+F12 references, Ctrl+K hover, Ctrl+Space completion, problems in the gutter.",
+                Value::Toggle(cfg.lsp.enabled),
+            ),
+            field(
+                FieldKey::LspServers,
+                "Server per language",
+                "`language = command`, e.g. `rust = rust-analyzer` or `cpp = clangd --background-index --compile-commands-dir=build`. C and C++ use `clangd --background-index` unless listed; `c =` (empty) turns one off.",
+                Value::List(
+                    cfg.lsp
+                        .servers
+                        .iter()
+                        .map(|(k, v)| format!("{k} = {v}"))
+                        .collect(),
+                ),
+            ),
+            field(
+                FieldKey::Ctags,
+                "ctags command",
+                "Universal Ctags, for definitions and symbols where no language server runs. Empty: off.",
+                Value::Text(cfg.lsp.ctags.clone()),
             ),
             field(
                 FieldKey::TabWidth,
@@ -1127,6 +1157,23 @@ impl ConfigForm {
                     Err(_) => errors.push(format!("archive days must be a number, got {v:?}")),
                 },
                 (FieldKey::SoftWrap, Value::Toggle(b)) => cfg.soft_wrap = *b,
+                (FieldKey::LspEnabled, Value::Toggle(b)) => cfg.lsp.enabled = *b,
+                (FieldKey::LspServers, Value::List(items)) => {
+                    cfg.lsp.servers.clear();
+                    for item in items {
+                        match item.split_once('=') {
+                            Some((k, v)) if !k.trim().is_empty() => {
+                                cfg.lsp
+                                    .servers
+                                    .insert(k.trim().to_owned(), v.trim().to_owned());
+                            }
+                            _ => errors.push(format!(
+                                "language server {item:?}: expected `language = command`"
+                            )),
+                        }
+                    }
+                }
+                (FieldKey::Ctags, Value::Text(v)) => v.trim().clone_into(&mut cfg.lsp.ctags),
                 (FieldKey::CopyCommand, Value::Text(v)) => {
                     v.trim().clone_into(&mut cfg.copy_command);
                 }

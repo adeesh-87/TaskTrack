@@ -83,11 +83,23 @@ pub enum Action {
     Find,
     /// Search in files.
     SearchFiles,
+    /// Go to the definition of the symbol at the cursor.
+    GotoDefinition,
+    /// References to the symbol at the cursor.
+    FindReferences,
+    /// What the language server knows about the symbol at the cursor.
+    Hover,
+    /// Go to a symbol of the workspace.
+    GotoSymbol,
+    /// Symbols of the open file.
+    Outline,
+    /// Rebuild the ctags index.
+    RebuildTags,
 }
 
 impl Action {
     /// Every action (for key overrides and help).
-    pub const ALL: [Action; 40] = [
+    pub const ALL: [Action; 46] = [
         Self::TaskList,
         Self::PlanDay,
         Self::RunHook,
@@ -128,6 +140,12 @@ impl Action {
         Self::Rebase,
         Self::Find,
         Self::SearchFiles,
+        Self::GotoDefinition,
+        Self::FindReferences,
+        Self::Hover,
+        Self::GotoSymbol,
+        Self::Outline,
+        Self::RebuildTags,
     ];
 
     /// Name used for key overrides (`palette.<name>`).
@@ -173,6 +191,12 @@ impl Action {
             Self::Rebase => "rebase",
             Self::Find => "find",
             Self::SearchFiles => "search_files",
+            Self::GotoDefinition => "goto_definition",
+            Self::FindReferences => "find_references",
+            Self::Hover => "hover",
+            Self::GotoSymbol => "goto_symbol",
+            Self::Outline => "outline",
+            Self::RebuildTags => "rebuild_tags",
         }
     }
 
@@ -182,6 +206,12 @@ impl Action {
             self,
             Self::Find
                 | Self::SearchFiles
+                | Self::GotoDefinition
+                | Self::FindReferences
+                | Self::Hover
+                | Self::GotoSymbol
+                | Self::Outline
+                | Self::RebuildTags
                 | Self::NewShell
                 | Self::CloseShell
                 | Self::FocusFiles
@@ -317,6 +347,12 @@ pub fn task_commands() -> Vec<Command> {
             "search in files (Ctrl+Shift+F; F4 next result)",
             Action::SearchFiles,
         ),
+        cmd('d', "go to definition (F12)", Action::GotoDefinition),
+        cmd('L', "list references (Shift+F12)", Action::FindReferences),
+        cmd('K', "hover: what the symbol is (Ctrl+K)", Action::Hover),
+        cmd('j', "go to symbol (Ctrl+T)", Action::GotoSymbol),
+        cmd('J', "symbols in this file (Ctrl+Shift+O)", Action::Outline),
+        cmd('I', "rebuild the ctags index", Action::RebuildTags),
         cmd('s', "new shell", Action::NewShell),
         cmd('x', "close selected shell", Action::CloseShell),
         cmd('o', "open CONTEXT.md", Action::OpenContext),

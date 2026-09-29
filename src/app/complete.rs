@@ -1,12 +1,14 @@
-//! Ctrl+Space: complete the word before the cursor from the words of the
-//! open files (nearest first). Until clangd is wired in, this is the
-//! "any word I have seen" completion.
+//! Ctrl+Space: complete the word before the cursor. With a language server
+//! for the file (clangd, …) its suggestions are asked for (see `lsp.rs`);
+//! otherwise, or when it has none, the words of the open files (nearest
+//! first).
 
 use std::collections::HashMap;
 
 use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 
 use crate::editor::Buffer;
+use crate::lsp::CompletionItem;
 
 use super::App;
 
@@ -20,10 +22,57 @@ const MIN_WORD: usize = 3;
 pub struct Completion {
     /// Where the word being completed starts (row, char column).
     pub start: (usize, usize),
-    /// Suggestions, best first.
-    pub items: Vec<String>,
+    /// Suggestions shown, best first.
+    pub items: Vec<CompletionItem>,
     /// Selected suggestion.
     pub selected: usize,
+    /// Everything the server offered (narrowed down as you type).
+    pub all: Vec<CompletionItem>,
+    /// The suggestions come from a language server.
+    pub from_server: bool,
+}
+
+impl Completion {
+    /// A list of words (no server).
+    pub fn words(start: (usize, usize), words: &[String]) -> Self {
+        Self {
+            start,
+            items: words.iter().map(|w| CompletionItem::word(w)).collect(),
+            selected: 0,
+            all: Vec::new(),
+            from_server: false,
+        }
+    }
+
+    /// A server's suggestions for `prefix`.
+    pub fn from_server(start: (usize, usize), all: Vec<CompletionItem>, prefix: &str) -> Self {
+        let items = narrow(&all, prefix);
+        Self {
+            start,
+            items,
+            selected: 0,
+            all,
+            from_server: true,
+        }
+    }
+}
+
+/// Server suggestions that fit `prefix`: starting with it (ignoring case),
+/// else containing it.
+pub fn narrow(all: &[CompletionItem], prefix: &str) -> Vec<CompletionItem> {
+    let p = prefix.to_lowercase();
+    let starts: Vec<CompletionItem> = all
+        .iter()
+        .filter(|i| i.filter.to_lowercase().starts_with(&p))
+        .cloned()
+        .collect();
+    if !starts.is_empty() || p.is_empty() {
+        return starts;
+    }
+    all.iter()
+        .filter(|i| i.filter.to_lowercase().contains(&p))
+        .cloned()
+        .collect()
 }
 
 fn is_word(c: char) -> bool {
@@ -31,7 +80,7 @@ fn is_word(c: char) -> bool {
 }
 
 /// The word before the cursor: its start column and text.
-fn prefix(ed: &Buffer) -> (usize, String) {
+pub fn prefix(ed: &Buffer) -> (usize, String) {
     let (row, col) = ed.cursor();
     let line: Vec<char> = ed
         .lines()
@@ -92,9 +141,17 @@ impl App {
         self.completion.as_ref()
     }
 
-    /// Ctrl+Space: list the words that complete the one before the cursor
-    /// (one match is inserted right away).
+    /// Ctrl+Space: ask the file's language server, or list the words that
+    /// complete the one before the cursor (one match is inserted right away).
     pub(super) fn open_completion(&mut self) {
+        if self.lsp_complete() {
+            return;
+        }
+        self.word_completion();
+    }
+
+    /// Word completion from the open files.
+    pub(super) fn word_completion(&mut self) {
         let Some(ctx) = self.active_context() else {
             return;
         };
@@ -112,35 +169,27 @@ impl App {
                 format!("no words start with {word}")
             }),
             1 => {
-                self.completion = Some(Completion {
-                    start: (row, start),
-                    items,
-                    selected: 0,
-                });
+                self.completion = Some(Completion::words((row, start), &items));
                 self.accept_completion();
             }
             _ => {
-                self.completion = Some(Completion {
-                    start: (row, start),
-                    items,
-                    selected: 0,
-                });
+                self.completion = Some(Completion::words((row, start), &items));
             }
         }
     }
 
     /// Replace the word before the cursor with the selected suggestion.
-    fn accept_completion(&mut self) {
+    pub(super) fn accept_completion(&mut self) {
         let Some(c) = self.completion.take() else {
             return;
         };
-        let Some(word) = c.items.get(c.selected) else {
+        let Some(word) = c.items.get(c.selected).map(|i| i.insert.clone()) else {
             return;
         };
         if let Some(ed) = self.active_context_mut().and_then(|x| x.editor.as_mut()) {
             let cursor = ed.cursor();
             ed.select_range(c.start, cursor);
-            ed.insert_str(word);
+            ed.insert_str(&word);
         }
     }
 
@@ -181,8 +230,8 @@ impl App {
 
     /// Let the editor take `key`, then list the words for the new prefix.
     fn refilter_after(&mut self, key: KeyEvent) {
-        let start = self.completion.as_ref().map(|c| c.start);
-        self.completion = None;
+        let old = self.completion.take();
+        let start = old.as_ref().map(|c| c.start);
         self.handle_editor_key(key);
         let Some(start) = start else { return };
         let Some(ctx) = self.active_context() else {
@@ -195,14 +244,17 @@ impl App {
         if (ed.cursor().0, col) != start || word.is_empty() {
             return;
         }
+        if let Some(old) = old.filter(|c| c.from_server) {
+            let c = Completion::from_server(start, old.all, &word);
+            if !c.items.is_empty() {
+                self.completion = Some(c);
+            }
+            return;
+        }
         let others: Vec<&Buffer> = ctx.recent.iter().collect();
         let items = suggest(&word, ed, start.0, &others);
         if !items.is_empty() {
-            self.completion = Some(Completion {
-                start,
-                items,
-                selected: 0,
-            });
+            self.completion = Some(Completion::words(start, &items));
         }
     }
 }

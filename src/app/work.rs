@@ -939,6 +939,7 @@ impl App {
         {
             self.save_session();
         }
+        self.lsp_sync();
         if self.watched.elapsed() >= WATCH {
             self.watched = now;
             self.reload_outside_changes();
