@@ -302,9 +302,15 @@ impl App {
                      Ctrl+F find · Ctrl+R replace · Enter/Shift+Enter next/previous · Alt+C case · Alt+W word\n  \
                      Alt+R regex · Tab switch fields · Alt+A replace all · Esc close · F3/Shift+F3 next/previous\n  \
                      Ctrl+Shift+F (Esc G) search in files · F4/Shift+F4 next/previous result\n  \
-                     Ctrl+G go to line · Tab/Shift+Tab indent/outdent · Ctrl+Space complete a word\n\n\
+                     Ctrl+G go to line · Tab/Shift+Tab indent/outdent · Ctrl+Space complete\n\n\
+                     CODE INTELLIGENCE (language servers such as clangd; ctags where none runs)\n  \
+                     F12 definition (Esc d) · Shift+F12 references (Esc L) · Ctrl+K hover (Esc K)\n  \
+                     Ctrl+T symbol in the workspace (Esc j) · Ctrl+Shift+O symbols of the file (Esc J)\n  \
+                     Alt+← / Alt+→ back / forward after a jump · F8 / Shift+F8 next / previous problem\n  \
+                     Esc I rebuilds the ctags index · servers per language: settings, `Server per language`\n\n\
+                     THE EDITOR ALONE\n  pahiri edit [FOLDER|FILE …] (or a pahiri-edit link): no tasks, no config needed\n\n\
                      EDITOR\n  Ctrl+S save · Ctrl+W close · Ctrl+Z undo · Ctrl+Y redo\n  \
-                     Shift+arrows/Home/End/PgUp/PgDn select · Ctrl+←/→ (Alt+←/→, Alt+B/F) by word, +Shift selects\n  \
+                     Shift+arrows/Home/End/PgUp/PgDn select · Ctrl+←/→ (Alt+B/F) by word, +Shift selects\n  \
                      Ctrl+Home/End file start/end · Ctrl+A select all\n  \
                      Ctrl+C copy · Ctrl+X cut · Ctrl+V paste (nothing selected: copy/cut the line)\n  \
                      Ctrl+Backspace (Ctrl+H, Alt+Backspace) / Ctrl+Delete (Alt+D) delete a word\n  \

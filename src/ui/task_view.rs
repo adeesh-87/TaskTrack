@@ -273,6 +273,11 @@ fn draw_editor(frame: &mut Frame<'_>, app: &mut App, area: Rect, theme: &Theme) 
     let highlighting = app.config().syntax_highlighting;
     let soft_wrap = app.config().soft_wrap;
     let bar = app.find_bar().filter(|f| f.open).map(FindBar::snapshot);
+    let diag = app.diagnostic_view();
+    let server = app
+        .active_context()
+        .and_then(|c| c.editor.as_ref())
+        .and_then(|e| app.lsp_label(e.path()));
     let Some(ctx) = app.active_context_mut() else {
         return;
     };
@@ -292,25 +297,55 @@ fn draw_editor(frame: &mut Frame<'_>, app: &mut App, area: Rect, theme: &Theme) 
     if ed.is_read_only() {
         title.push_str("[read-only] ");
     }
+    let mut problems = Vec::new();
+    if diag.counts.0 > 0 {
+        problems.push(Span::styled(
+            format!("✖ {} ", diag.counts.0),
+            Style::new().fg(theme.error),
+        ));
+    }
+    if diag.counts.1 > 0 {
+        problems.push(Span::styled(
+            format!("⚠ {} ", diag.counts.1),
+            Style::new().fg(theme.warning),
+        ));
+    }
+    let mut title_spans = vec![Span::styled(title, Style::new().fg(theme.accent))];
+    title_spans.extend(problems);
+    // The problem on the cursor's line, after the position.
+    let at_cursor = diag.at_cursor.as_ref().map(|(sev, msg)| {
+        let style = match sev {
+            1 => Style::new().fg(theme.error),
+            2 => Style::new().fg(theme.warning),
+            _ => Style::new().fg(theme.muted),
+        };
+        let room = (area.width as usize).saturating_sub(24);
+        let msg: String = msg.chars().take(room).collect();
+        Span::styled(format!("{msg} "), style)
+    });
     let block = Block::bordered()
-        .title(Span::styled(title, Style::new().fg(theme.accent)))
-        .title_bottom(Line::styled(
-            match ed.selection() {
-                Some((a, b)) if a.0 == b.0 => format!(
-                    " {}:{} · {} selected ",
-                    ed.cursor().0 + 1,
-                    ed.cursor().1 + 1,
-                    b.1 - a.1
-                ),
-                Some((a, b)) => format!(
-                    " {}:{} · {} lines selected ",
-                    ed.cursor().0 + 1,
-                    ed.cursor().1 + 1,
-                    b.0 - a.0 + 1
-                ),
-                None => format!(" {}:{} ", ed.cursor().0 + 1, ed.cursor().1 + 1),
-            },
-            Style::new().fg(theme.muted),
+        .title(Line::from(title_spans))
+        .title_bottom(Line::from(
+            std::iter::once(Span::styled(
+                match ed.selection() {
+                    Some((a, b)) if a.0 == b.0 => format!(
+                        " {}:{} · {} selected ",
+                        ed.cursor().0 + 1,
+                        ed.cursor().1 + 1,
+                        b.1 - a.1
+                    ),
+                    Some((a, b)) => format!(
+                        " {}:{} · {} lines selected ",
+                        ed.cursor().0 + 1,
+                        ed.cursor().1 + 1,
+                        b.0 - a.0 + 1
+                    ),
+                    None => format!(" {}:{} ", ed.cursor().0 + 1, ed.cursor().1 + 1),
+                },
+                Style::new().fg(theme.muted),
+            ))
+            .chain(at_cursor)
+            .collect::<Vec<_>>(),
         ))
         .border_style(theme.border(focused));
     let mut inner = block.inner(area);
@@ -343,7 +378,12 @@ fn draw_editor(frame: &mut Frame<'_>, app: &mut App, area: Rect, theme: &Theme) 
     }
     let language = ctx.highlight.as_ref().map(|h| h.language);
     let wrap = soft_wrap && matches!(language, None | Some(Language::Markdown));
-    let title_lang = language.map_or(String::new(), |l| format!(" {l:?} ").to_lowercase());
+    let title_lang = match (language, server) {
+        (Some(l), Some(s)) => format!(" {} · {s} ", format!("{l:?}").to_lowercase()),
+        (Some(l), None) => format!(" {l:?} ").to_lowercase(),
+        (None, Some(s)) => format!(" {s} "),
+        (None, None) => String::new(),
+    };
     let Some(ed) = &mut ctx.editor else { return };
     let height = inner.height as usize;
     let gutter = (ed.lines().len().max(1).to_string().len() + 1) as u16;
@@ -416,7 +456,13 @@ fn draw_editor(frame: &mut Frame<'_>, app: &mut App, area: Rect, theme: &Theme) 
             } else {
                 format!("{:>w$} ", "·", w = gutter as usize - 1)
             };
-            let mut all = vec![Span::styled(number, Style::new().fg(theme.muted))];
+            let number_style = match diag.lines.get(&i) {
+                Some(1) if ci == 0 => Style::new().fg(theme.error).add_modifier(Modifier::BOLD),
+                Some(2) if ci == 0 => Style::new().fg(theme.warning).add_modifier(Modifier::BOLD),
+                Some(_) if ci == 0 => Style::new().fg(theme.accent),
+                _ => Style::new().fg(theme.muted),
+            };
+            let mut all = vec![Span::styled(number, number_style)];
             all.extend(spans);
             if i == crow {
                 let last = ci + 1 == chunks.len();
@@ -463,6 +509,15 @@ fn draw_editor(frame: &mut Frame<'_>, app: &mut App, area: Rect, theme: &Theme) 
             }
         }
     }
+    paint_problems(
+        frame,
+        ed,
+        &diag.ranges,
+        &rows,
+        (inner.x + gutter, inner.x + inner.width, inner.y),
+        text_width,
+        tab_width,
+    );
     if !title_lang.is_empty() {
         let w = title_lang.chars().count() as u16;
         if area.width > w + 4 {
@@ -538,14 +593,21 @@ fn draw_completion(
     theme: &Theme,
 ) {
     let rows = c.items.len().min(8) as u16;
-    let width = c
+    let label_w = c
         .items
         .iter()
-        .map(|w| w.chars().count())
+        .map(|i| i.label.chars().count())
         .max()
         .unwrap_or(0)
-        .min(40) as u16
-        + 2;
+        .min(40);
+    let detail_w = c
+        .items
+        .iter()
+        .map(|i| i.detail.chars().count())
+        .max()
+        .unwrap_or(0)
+        .min(30);
+    let width = (label_w + if detail_w > 0 { detail_w + 2 } else { 0 }) as u16 + 2;
     if area.width < width || area.height < rows + 1 {
         return;
     }
@@ -568,17 +630,63 @@ fn draw_completion(
         .enumerate()
         .skip(first)
         .take(rows as usize)
-        .map(|(i, w)| {
+        .map(|(i, item)| {
             let style = if i == c.selected {
                 theme.selected(true)
             } else {
                 Style::new().bg(theme.bar_bg).fg(theme.fg)
             };
-            Line::styled(format!(" {w:<w2$} ", w2 = width as usize - 2), style)
+            let label: String = item.label.chars().take(label_w).collect();
+            let mut spans = vec![Span::styled(format!(" {label:<label_w$}"), style)];
+            if detail_w > 0 {
+                let detail: String = item.detail.chars().take(detail_w).collect();
+                spans.push(Span::styled(
+                    format!("  {detail:<detail_w$} "),
+                    style.fg(theme.muted),
+                ));
+            } else {
+                spans.push(Span::styled(" ", style));
+            }
+            Line::from(spans)
         })
         .collect();
     frame.render_widget(ratatui::widgets::Clear, rect);
     frame.render_widget(Paragraph::new(lines), rect);
+}
+
+/// Underline the problems on the visible rows.
+fn paint_problems(
+    frame: &mut Frame<'_>,
+    ed: &crate::editor::Buffer,
+    ranges: &[(usize, usize, usize, u8)],
+    rows: &[(usize, usize)],
+    cols: (u16, u16, u16),
+    text_width: usize,
+    tab_width: usize,
+) {
+    if ranges.is_empty() {
+        return;
+    }
+    let (text_x, right, top) = cols;
+    let buf = frame.buffer_mut();
+    for (vi, &(i, chunk_start)) in rows.iter().enumerate() {
+        let chunk_end = match rows.get(vi + 1) {
+            Some(&(next, s)) if next == i => s,
+            _ => chunk_start + text_width,
+        };
+        let line = &ed.lines()[i];
+        for &(_, start, end, _) in ranges.iter().filter(|r| r.0 == i) {
+            let a = display_col(line, start, tab_width);
+            let b = display_col(line, end, tab_width).max(a + 1);
+            for col in a.max(chunk_start)..b.min(chunk_end) {
+                let x = text_x + (col - chunk_start) as u16;
+                if x < right {
+                    let cell = &mut buf[(x, top + vi as u16)];
+                    cell.set_style(cell.style().add_modifier(Modifier::UNDERLINED));
+                }
+            }
+        }
+    }
 }
 
 /// Mark the find matches on the visible rows (the selected one already

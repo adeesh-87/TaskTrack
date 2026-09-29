@@ -352,6 +352,12 @@ pub fn draw(frame: &mut Frame<'_>, popup: &Popup, area: Rect, theme: &Theme) {
                     };
                     Span::styled(c.to_string(), style)
                 }));
+                if !item.detail.is_empty() {
+                    spans.push(Span::styled(
+                        format!("  {}", item.detail),
+                        Style::new().fg(theme.muted).patch(base),
+                    ));
+                }
                 Line::from(spans)
             });
             let (list, _) = list_lines(rows, f.selected, max_list.saturating_sub(3).max(3));

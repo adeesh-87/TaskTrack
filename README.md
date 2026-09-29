@@ -166,7 +166,7 @@ emulator as usual. `mouse = false` in the config turns capture off.
 | keys | what |
 | ---- | ---- |
 | `Shift` + arrows / `Home` / `End` / `PgUp` / `PgDn` | select |
-| `Ctrl+←/→` (`Alt+←/→`, `Alt+B`/`Alt+F`) | move by word; add `Shift` to select |
+| `Ctrl+←/→` (`Alt+B`/`Alt+F`) | move by word; add `Shift` to select (`Alt+Shift+←/→` too) |
 | `Ctrl+Home` / `Ctrl+End` | start / end of the file |
 | `Ctrl+A` | select all |
 | `Ctrl+C` / `Ctrl+X` | copy / cut the selection (nothing selected: the whole line) |
@@ -207,7 +207,13 @@ extra roots), and one file shows at a time with the others kept on a stack.
 | `F3` / `Shift+F3` | next / previous match with the bar closed |
 | `Ctrl+Shift+F` | search in files (below); `Ctrl+F` in the file tree searches the selected folder |
 | `F4` / `Shift+F4` | next / previous search result |
-| `Ctrl+Space` | complete the word from the open files (`↑/↓`, `Tab`/`Enter`, keep typing to narrow) |
+| `Ctrl+Space` | complete: from the file's language server, else the words of the open files (`↑/↓`, `Tab`/`Enter`, keep typing to narrow) |
+| `F12` / `Shift+F12` | go to the definition / list the references of the symbol at the cursor |
+| `Ctrl+K` | what the language server knows about the symbol (type, docs) |
+| `Ctrl+T` | go to a symbol of the workspace (2+ characters) |
+| `Ctrl+Shift+O` | symbols of the open file (type to filter) |
+| `Alt+←` / `Alt+→` | back to where a jump started / forward again |
+| `F8` / `Shift+F8` | next / previous problem the language server found |
 
 **Search in files** looks through the task folder and the attached code
 workspaces (builds too once you switch them on) in the background, skipping
@@ -222,9 +228,70 @@ keeps its settings until you close pahiri.
 Also: `Enter` keeps the indentation (one more level after `{`, `(`, `[`),
 files keep their line endings (CRLF stays CRLF), and a file that changes
 on disk is reloaded when it has no unsaved changes (you are told when it
-has). The terminal keys `Ctrl+Tab`, `Ctrl+Shift+F` and `Ctrl+Enter` need
-the kitty keyboard protocol (see *Panes and shells*); elsewhere use
-`Alt+]`, `Esc G` and `Alt+Enter`.
+has). The terminal keys `Ctrl+Tab`, `Ctrl+Shift+F`, `Ctrl+Shift+O` and
+`Ctrl+Enter` need the kitty keyboard protocol (see *Panes and shells*);
+elsewhere use `Alt+]`, `Esc G`, `Esc J` and `Alt+Enter`.
+
+### Code intelligence: clangd and ctags
+
+Open a C or C++ file and pahiri starts `clangd --background-index` for its
+project: the nearest folder with `compile_commands.json` (or
+`build/compile_commands.json`, `compile_flags.txt`, `.clangd`), else the git
+checkout. clangd's background index (in the project's `.cache/clangd`) is
+what makes definitions and references fast after the first run; the
+editor's title shows its progress (`c · clangd · indexing 40%`). Problems
+colour the line numbers (red: error, yellow: warning), are underlined, are
+counted in the title and the one on the cursor's line is shown on the
+bottom border; `F8` walks through them.
+
+clangd needs to know how each file is compiled. With CMake add
+`-DCMAKE_EXPORT_COMPILE_COMMANDS=ON`; with make, `bear -- make`; for a
+Yocto recipe, point a `.clangd` file at the build's database:
+
+```yaml
+# <workspace>/.clangd
+CompileFlags:
+  CompilationDatabase: /path/to/build/tmp/work/…/build
+```
+
+Other languages work the same once they have a server:
+
+```toml
+[lsp]
+enabled = true
+ctags = "ctags"                       # "" turns the fallback off
+[lsp.servers]
+rust = "rust-analyzer"
+python = "pylsp"
+go = "gopls"
+cpp = "clangd --background-index --compile-commands-dir=build"
+# c = ""                              # no server for C
+```
+
+Where no server runs (none installed, a language without one, or it finds
+nothing), `F12`, `Ctrl+T` and `Ctrl+Shift+O` use **Universal Ctags**: pahiri
+indexes the same files quick open lists (`.gitignore` respected) in the
+background, keeps the tags in its state folder and rebuilds them when they
+are older than ten minutes (`Esc I` rebuilds now). Install it with
+`apt install universal-ctags` / `brew install universal-ctags`.
+
+### The editor alone: `pahiri edit`
+
+```sh
+pahiri edit                       # the current folder
+pahiri edit ~/src/fw ~/src/app    # two folders: the tree shows both
+pahiri edit src/net/socket.c      # opens the file, its folder in the tree
+ln -s "$(command -v pahiri)" ~/bin/pahiri-edit   # `pahiri-edit …` does the same
+```
+
+The same editor as a task's, without the task manager: files, editor,
+shells, quick open, search in files, language servers and ctags work over
+the folders given; there are no tasks, timer, hooks or sessions, and the
+palette (`Esc`) only has editor commands (`q` quits). No config is needed —
+on a machine where you only edit code, copy the one binary; a config file,
+when there is one, still sets the colours, keys, shell and language
+servers. Inside pahiri, a task's view is this editor over the task folder
+and its attached workspaces.
 
 ### Syntax highlighting
 
@@ -479,6 +546,7 @@ first.
 ## Command line
 
 ```sh
+pahiri edit [PATH…]                  # the code editor alone (see "The editor alone")
 pahiri task next                     # current checkpoint ($PAHIRI_TASK or --task ID)
 pahiri task log "found the root cause"
 pahiri task ready [--off]
@@ -651,6 +719,9 @@ Config: `~/.config/pahiri/config.toml`. Logs and generated shell files:
 | `mouse` | true | mouse capture (drag selects in the editor; Shift+drag uses the terminal's selection) |
 | `syntax_highlighting` | true | C, C++, Rust, Bash, Python, CMake, Make, logs, Markdown |
 | `tab_width` | 4 | editor rendering |
+| `lsp.enabled` | true | start language servers for open files |
+| `lsp.servers` | {} | `language = "command"`; C / C++ default to `clangd --background-index`, `""` turns one off |
+| `lsp.ctags` | `ctags` | Universal Ctags for definitions and symbols without a server; `""`: off |
 | `scrollback_lines` | 5000 | per shell |
 | `status_file` | `status.md` | board file inside `tasks_dir` |
 | `context_file` | `CONTEXT.md` | expected in every task folder (⚠ shown when missing) |

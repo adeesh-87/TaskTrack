@@ -10,6 +10,7 @@ flows (board → palette → task from ticket → attach → prepare → shell w
 screen. Exit status is non-zero if a screen does not show what it should.
 """
 import os
+import shutil
 import subprocess
 import sys
 import tempfile
@@ -309,6 +310,33 @@ branch = subprocess.run(["git", "-C", repo, "branch", "--show-current"], capture
 print("workspace branch:", branch)
 if branch != "PROJ-42":
     failures.append(f"workspace branch is {branch!r}")
+
+# The editor alone: `pahiri edit` over the workspace, without any config.
+screen = pyte.Screen(COLS, ROWS)
+stream = pyte.ByteStream(screen)
+open(os.path.join(repo, "main.c"), "w").write(
+    "static int helper(void) { return 1; }\nint main(void) { return helper(); }\n"
+)
+edit_env = {**env, "XDG_CONFIG_HOME": os.path.join(work, "no-config")}
+child = pexpect.spawn(BIN, ["edit", repo, os.path.join(repo, "main.c")],
+                      dimensions=(ROWS, COLS), env=edit_env, timeout=5)
+wait_for("pahiri edit")
+dump("pahiri edit", "pahiri edit")
+if "PLANNED" in text():
+    failures.append("pahiri edit shows the task board")
+send("\x07", 0.3)
+send("2:26\r", 0.3)                            # Ctrl+G: the call of helper
+if shutil.which("clangd") or shutil.which("ctags"):
+    # F12: clangd answers when it is up; ctags needs its index first.
+    for _ in range(3):
+        send("\x1b[24~", 0.5)
+        if wait_for("1:12", 5):
+            break
+    dump("F12 definition", "1:12")
+send("\x1b")
+send("q", 1.0)
+child.expect(pexpect.EOF, timeout=5)
+
 if failures:
     print("FAILURES:\n  " + "\n  ".join(failures))
     sys.exit(1)

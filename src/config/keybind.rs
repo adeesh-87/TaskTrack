@@ -76,13 +76,36 @@ impl KeyCombo {
 
     /// Whether `event` is this combo. Shift is ignored for plain characters so that
     /// e.g. `ctrl+b` matches regardless of how the terminal reports it.
+    ///
+    /// Terminals without the kitty keyboard protocol send one byte for several
+    /// Ctrl keys (Ctrl+/ = Ctrl+_ = Ctrl+7 = 0x1f, …) and crossterm reports it
+    /// as the digit; with Ctrl those count as the same key.
     pub fn matches(&self, event: &KeyEvent) -> bool {
+        let relevant = KeyModifiers::CONTROL | KeyModifiers::ALT;
+        let ctrl = self.modifiers.contains(KeyModifiers::CONTROL);
         let code_matches = match (self.code, event.code) {
-            (KeyCode::Char(a), KeyCode::Char(b)) => a.eq_ignore_ascii_case(&b),
+            (KeyCode::Char(a), KeyCode::Char(b)) => {
+                a.eq_ignore_ascii_case(&b)
+                    || (ctrl
+                        && shared_control_byte(a)
+                            .is_some_and(|x| Some(x) == shared_control_byte(b)))
+            }
             (a, b) => a == b,
         };
-        let relevant = KeyModifiers::CONTROL | KeyModifiers::ALT;
         code_matches && (event.modifiers & relevant) == (self.modifiers & relevant)
+    }
+}
+
+/// The byte a legacy terminal sends for Ctrl + `c`, for the keys that share
+/// one (letters, Esc and Backspace are left alone).
+fn shared_control_byte(c: char) -> Option<u8> {
+    match c {
+        ' ' | '@' | '2' => Some(0),
+        '\\' | '4' => Some(0x1c),
+        ']' | '5' => Some(0x1d),
+        '^' | '6' | '~' => Some(0x1e),
+        '/' | '_' | '7' | '-' => Some(0x1f),
+        _ => None,
     }
 }
 
@@ -118,6 +141,21 @@ mod tests {
         assert!(k.matches(&KeyEvent::new(KeyCode::Char('b'), KeyModifiers::CONTROL)));
         assert!(!k.matches(&KeyEvent::new(KeyCode::Char('b'), KeyModifiers::NONE)));
         assert!(!k.matches(&KeyEvent::new(KeyCode::Char('a'), KeyModifiers::CONTROL)));
+    }
+
+    #[test]
+    fn ctrl_slash_matches_what_legacy_terminals_send() {
+        let k = KeyCombo::parse("ctrl+/").unwrap();
+        let ctrl = |c| KeyEvent::new(KeyCode::Char(c), KeyModifiers::CONTROL);
+        assert!(k.matches(&ctrl('/')), "kitty protocol");
+        assert!(k.matches(&ctrl('7')), "0x1f as crossterm reports it");
+        assert!(k.matches(&ctrl('_')));
+        assert!(!k.matches(&ctrl('8')));
+        assert!(!k.matches(&KeyEvent::new(KeyCode::Char('/'), KeyModifiers::NONE)));
+        assert!(!k.matches(&KeyEvent::new(KeyCode::Char('7'), KeyModifiers::ALT)));
+        let b = KeyCombo::parse("ctrl+b").unwrap();
+        assert!(!b.matches(&ctrl('2')), "letters have their own byte");
+        assert!(KeyCombo::parse("ctrl+space").unwrap().matches(&ctrl('2')));
     }
 
     #[test]

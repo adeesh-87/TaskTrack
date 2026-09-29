@@ -316,6 +316,46 @@ impl Default for PlannerConfig {
     }
 }
 
+/// Language servers (clangd, …) and ctags for the code editor.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(default)]
+pub struct LspConfig {
+    /// Start language servers for open files.
+    pub enabled: bool,
+    /// Server command per language (`c`, `cpp`, `rust`, `python`, `go`, …),
+    /// on top of the built-in `clangd --background-index` for C and C++; an
+    /// empty command turns a language's server off.
+    pub servers: BTreeMap<String, String>,
+    /// Universal Ctags, for definitions and symbols where no server runs
+    /// (empty: off).
+    pub ctags: String,
+}
+
+impl Default for LspConfig {
+    fn default() -> Self {
+        Self {
+            enabled: true,
+            servers: BTreeMap::new(),
+            ctags: "ctags".into(),
+        }
+    }
+}
+
+impl LspConfig {
+    /// The server command line for `language`, if any.
+    pub fn server_for(&self, language: &str) -> Option<Vec<String>> {
+        if !self.enabled {
+            return None;
+        }
+        let cmd = match self.servers.get(language) {
+            Some(c) => c.clone(),
+            None if matches!(language, "c" | "cpp") => "clangd --background-index".into(),
+            None => return None,
+        };
+        shell_words::split(&cmd).ok().filter(|w| !w.is_empty())
+    }
+}
+
 /// The persisted configuration.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(default)]
@@ -394,6 +434,8 @@ pub struct Config {
     pub planner: PlannerConfig,
     /// The audit.
     pub audit: AuditConfig,
+    /// Language servers and ctags for the code editor.
+    pub lsp: LspConfig,
 }
 
 impl Default for Config {
@@ -433,6 +475,7 @@ impl Default for Config {
             timer: TimerConfig::default(),
             planner: PlannerConfig::default(),
             audit: AuditConfig::default(),
+            lsp: LspConfig::default(),
         }
     }
 }

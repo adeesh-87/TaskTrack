@@ -11,6 +11,7 @@ pub mod event;
 pub mod find;
 pub mod finder;
 pub mod keymap;
+pub mod lsp;
 pub mod palette;
 pub mod popup;
 pub mod search;
@@ -192,6 +193,8 @@ pub struct App {
     completion: Option<complete::Completion>,
     /// `pahiri edit`: only the code editor (no tasks, timer or hooks).
     code_mode: bool,
+    /// Language servers and the ctags index.
+    lsp: lsp::LspState,
 }
 
 impl App {
@@ -275,6 +278,7 @@ impl App {
             search: None,
             completion: None,
             code_mode: false,
+            lsp: lsp::LspState::default(),
         };
         app.config_mtime = app.config_file_mtime();
         if matches!(app.mode, Mode::Home) {
@@ -715,7 +719,13 @@ impl App {
             | K::AuditProgress => HelpTopic::Audit,
             K::Hooks | K::HookTimeout | K::PeriodicMinutes => HelpTopic::Hooks,
             K::GerritUrl | K::GerritStatus => HelpTopic::Gerrit,
-            K::Keys | K::LeaderKey | K::CopyCommand | K::PasteCommand => HelpTopic::Keys,
+            K::Keys
+            | K::LeaderKey
+            | K::CopyCommand
+            | K::PasteCommand
+            | K::LspEnabled
+            | K::LspServers
+            | K::Ctags => HelpTopic::Keys,
             K::FocusMinutes
             | K::TimerFlash
             | K::TimerBell
@@ -1531,6 +1541,12 @@ impl App {
             Action::PushReview => self.request_git_job(gerrit::GitJob::Push),
             Action::Rebase => self.request_git_job(gerrit::GitJob::Rebase),
             Action::SearchFiles => self.open_search(None),
+            Action::GotoDefinition => self.goto_definition(),
+            Action::FindReferences => self.find_references(),
+            Action::Hover => self.hover(),
+            Action::GotoSymbol => self.open_symbols(),
+            Action::Outline => self.open_outline(),
+            Action::RebuildTags => self.rebuild_tags(),
             Action::Find => {
                 if let Some(ctx) = self.active_context_mut() {
                     if ctx.editor.is_some() {
@@ -1777,6 +1793,8 @@ impl App {
                 truncated,
             } => self.index_built(&roots, files, truncated),
             JobEvent::SearchHits { id, file } => self.search_hits(id, file),
+            JobEvent::Lsp { server, event } => self.lsp_event(server, event),
+            JobEvent::Tags { roots, tags, error } => self.tags_built(&roots, tags, error),
             JobEvent::SearchDone {
                 id,
                 searched,
@@ -1982,6 +2000,27 @@ impl App {
                 self.open_completion();
                 return;
             }
+            (KeyCode::F(12), m) if focus == Focus::Editor => {
+                if m.contains(KeyModifiers::SHIFT) {
+                    self.find_references();
+                } else {
+                    self.goto_definition();
+                }
+                return;
+            }
+            (KeyCode::Char('k'), KeyModifiers::CONTROL) if focus == Focus::Editor => {
+                self.hover();
+                return;
+            }
+            (KeyCode::F(8), m) if focus == Focus::Editor => {
+                self.next_diagnostic(!m.contains(KeyModifiers::SHIFT));
+                return;
+            }
+            // Back / forward after F12, Ctrl+T, … (word moves: Ctrl+←/→).
+            (KeyCode::Left | KeyCode::Right, KeyModifiers::ALT) if focus == Focus::Editor => {
+                self.jump_back(key.code == KeyCode::Right);
+                return;
+            }
             (KeyCode::F(4), m) if focus == Focus::Editor => {
                 self.search_step(!m.contains(KeyModifiers::SHIFT));
                 return;
@@ -2059,6 +2098,8 @@ impl App {
             }
             KeyCode::Char('e') if !shift => self.open_recent_menu(),
             KeyCode::Char('p') if !shift => self.open_quick_open(),
+            KeyCode::Char('t') if !shift => self.open_symbols(),
+            KeyCode::Char('o' | 'O') if shift => self.open_outline(),
             KeyCode::Char('f' | 'F') if shift => self.open_search(None),
             // Ctrl+F in the file tree: search in the selected folder.
             KeyCode::Char('f') if focus == Focus::Tree => {
@@ -2130,6 +2171,11 @@ impl App {
         let ctrl = key.modifiers.contains(KeyModifiers::CONTROL);
         let alt = key.modifiers.contains(KeyModifiers::ALT);
         let shift = key.modifiers.contains(KeyModifiers::SHIFT);
+        // A leader such as Ctrl+/ arrives as Ctrl+7 from most terminals: it
+        // is the leader, not "shell 7" (Alt+7 still selects it).
+        if self.leader.matches(&key) {
+            return Some(false);
+        }
         let ctx = self.active_context_mut()?;
         // In the editor and the file tree Ctrl+Tab switches files instead.
         let files = matches!(ctx.focus, Focus::Editor | Focus::Tree);
@@ -3345,6 +3391,7 @@ impl App {
 
     /// Book and save the timer, save the session, and kill all shells before exit.
     pub fn shutdown(&mut self) {
+        self.lsp_shutdown();
         // Book the timer, then save it (and the shells' folders) so the next
         // start restores it paused and offers the time pahiri was closed.
         if self.timer.is_some() {

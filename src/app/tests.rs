@@ -2760,14 +2760,23 @@ fn ctrl_space_completes_words_from_open_files() {
     h.type_str("dep");
     let ctrl_space = KeyEvent::new(KeyCode::Char(' '), KeyModifiers::CONTROL);
     h.press(ctrl_space);
+    let labels = |h: &Harness| -> Vec<String> {
+        h.app
+            .completion()
+            .unwrap()
+            .items
+            .iter()
+            .map(|i| i.label.clone())
+            .collect()
+    };
     assert_eq!(
-        h.app.completion().unwrap().items,
+        labels(&h),
         ["deploy_image", "deploy_firmware"],
         "this file's words first"
     );
     // Typing narrows the list; one left still shows until accepted.
     h.type_str("loy_f");
-    assert_eq!(h.app.completion().unwrap().items, ["deploy_firmware"]);
+    assert_eq!(labels(&h), ["deploy_firmware"]);
     h.press(key(KeyCode::Tab));
     assert!(h.app.completion().is_none());
     assert_eq!(
@@ -2852,4 +2861,236 @@ fn pahiri_edit_is_the_code_editor_alone() {
     h.press(key(KeyCode::Esc));
     h.press(key(KeyCode::Char('q')));
     assert!(h.app.should_quit());
+}
+
+#[test]
+fn ctrl_slash_leader_works_in_the_editor_on_any_terminal() {
+    let mut h = Harness::build(true, |cfg| cfg.leader_key = "ctrl+/".into());
+    let file = h.tasks.join("alpha/scripts/run.sh");
+    h.press(key(KeyCode::Enter));
+    h.app.request_open_file(&file);
+    assert_eq!(h.ctx().focus, Focus::Editor);
+    // Most terminals send Ctrl+/ as 0x1f, which arrives as Ctrl+7: it is
+    // the leader, not "shell 7".
+    h.press(ctrl('7'));
+    assert!(h.app.leader_pending());
+    assert!(h.app.status().is_none(), "{:?}", h.app.status());
+    h.press(key(KeyCode::Esc));
+    assert!(matches!(h.app.popup(), Some(Popup::Palette(_))));
+    h.press(key(KeyCode::Esc));
+    // With the kitty protocol it arrives as itself.
+    h.press(ctrl('/'));
+    assert!(h.app.leader_pending());
+    h.press(key(KeyCode::Esc));
+    assert!(matches!(h.app.popup(), Some(Popup::Palette(_))));
+    h.press(key(KeyCode::Esc));
+    // Alt+7 still selects shell 7.
+    h.press(alt('7'));
+    assert!(h.app.status().unwrap_or_default().contains("no shell #7"));
+}
+
+fn has(program: &str) -> bool {
+    Command::new(program).arg("--version").output().is_ok()
+}
+
+const HELPER_C: &str = "int helper(void) { return 1; }\nint main(void) {\n  int x = helper();\n  bad;\n  hel\n  return x;\n}\n";
+
+/// `pahiri edit` over `src/main.c` (above) using the fake language server.
+fn fake_server_editor() -> Harness {
+    let mut h = Harness::editor(
+        |root| {
+            fs::create_dir_all(root.join("src")).unwrap();
+            fs::write(root.join("src/main.c"), HELPER_C).unwrap();
+        },
+        &["src/main.c"],
+    );
+    let script = Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/fake_lsp.py");
+    let log = h.root.join("lsp.log");
+    h.app.config.lsp.servers.insert(
+        "c".into(),
+        format!("python3 {} {}", script.display(), log.display()),
+    );
+    h
+}
+
+fn editor_cursor(h: &Harness) -> (usize, usize) {
+    h.ctx().editor.as_ref().unwrap().cursor()
+}
+
+#[test]
+fn language_server_answers_drive_the_editor() {
+    if !has("python3") {
+        eprintln!("python3 not installed: skipped");
+        return;
+    }
+    let mut h = fake_server_editor();
+    // Opening the file starts the server; its diagnostics mark the line.
+    h.app.lsp_sync();
+    assert!(h.pump_until(|app| app.diagnostic_view().counts.0 == 1));
+    let view = h.app.diagnostic_view();
+    assert_eq!(view.lines.get(&3), Some(&1));
+    assert_eq!(view.ranges, [(3, 2, 5, 1)]);
+    let rows = screen(&mut h.app, 100, 30);
+    assert!(
+        rows.iter()
+            .any(|r| r.contains("main.c") && r.contains("✖ 1")),
+        "{rows:#?}"
+    );
+    assert!(rows.iter().any(|r| r.contains("c · python3")), "{rows:#?}");
+    // F8 goes to the problem and says what it is.
+    h.press(key(KeyCode::F(8)));
+    assert_eq!(editor_cursor(&h), (3, 2));
+    assert!(h.app.status().unwrap_or_default().contains("bad is bad"));
+    // F12 on `helper` jumps to its definition; Alt+← comes back, Alt+→ again.
+    h.press(ctrl('g'));
+    h.type_str("3:12");
+    h.press(key(KeyCode::Enter));
+    h.press(key(KeyCode::F(12)));
+    assert!(h.pump_until(|app| app
+        .active_context()
+        .and_then(|c| c.editor.as_ref())
+        .is_some_and(|e| e.cursor() == (0, 4))));
+    h.press(KeyEvent::new(KeyCode::Left, KeyModifiers::ALT));
+    assert_eq!(editor_cursor(&h), (2, 11));
+    h.press(KeyEvent::new(KeyCode::Right, KeyModifiers::ALT));
+    assert_eq!(editor_cursor(&h), (0, 4));
+    h.press(KeyEvent::new(KeyCode::Left, KeyModifiers::ALT));
+    // Shift+F12 lists the references.
+    h.press(KeyEvent::new(KeyCode::F(12), KeyModifiers::SHIFT));
+    assert!(h.pump_until(|app| matches!(app.popup(), Some(Popup::Finder(_)))));
+    assert_eq!(finder(&h).kind, finder::FinderKind::Locations);
+    assert_eq!(finder(&h).items.len(), 2);
+    assert!(finder(&h).items[1].label.ends_with("main.c:3"));
+    h.press(key(KeyCode::Down));
+    h.press(key(KeyCode::Enter));
+    assert_eq!(editor_cursor(&h), (2, 10));
+    // Ctrl+K shows what the server says.
+    h.press(ctrl('k'));
+    assert!(h.pump_until(|app| matches!(app.popup(), Some(Popup::Doc { .. }))));
+    let Some(Popup::Doc { lines, .. }) = h.app.popup() else {
+        unreachable!()
+    };
+    assert_eq!(lines, &["int helper(void)", "Returns one."]);
+    h.press(key(KeyCode::Esc));
+    // Ctrl+Space asks the server; typing narrows its list.
+    h.press(ctrl('g'));
+    h.type_str("5:6");
+    h.press(key(KeyCode::Enter));
+    h.press(KeyEvent::new(KeyCode::Char(' '), KeyModifiers::CONTROL));
+    assert!(h.pump_until(|app| app.completion().is_some()));
+    let c = h.app.completion().unwrap();
+    assert!(c.from_server);
+    assert_eq!(c.items[1].detail, "void");
+    h.type_str("per_t");
+    assert_eq!(h.app.completion().unwrap().items.len(), 1);
+    h.press(key(KeyCode::Tab));
+    assert_eq!(h.ctx().editor.as_ref().unwrap().lines()[4], "  helper_two");
+    // Ctrl+T asks for symbols; Ctrl+Shift+O lists the file's.
+    h.press(ctrl('t'));
+    h.press(ctrl('u'));
+    h.type_str("abc");
+    assert!(h.pump_until(|app| matches!(app.popup(),
+        Some(Popup::Finder(f)) if f.items.first().is_some_and(|i| i.label == "abc_sym"))));
+    h.press(key(KeyCode::Enter));
+    assert_eq!(editor_cursor(&h), (0, 4));
+    h.press(KeyEvent::new(
+        KeyCode::Char('O'),
+        KeyModifiers::CONTROL | KeyModifiers::SHIFT,
+    ));
+    assert!(h.pump_until(|app| matches!(app.popup(),
+        Some(Popup::Finder(f)) if f.kind == finder::FinderKind::Outline)));
+    let names: Vec<&str> = finder(&h).items.iter().map(|i| i.label.as_str()).collect();
+    assert_eq!(names, ["helper", "main"]);
+    h.type_str("mai");
+    h.press(key(KeyCode::Enter));
+    assert_eq!(editor_cursor(&h), (1, 4));
+    // Edits reach the server; its requests are answered; quitting stops it.
+    h.type_str("bad");
+    h.app.lsp_sync();
+    assert!(h.pump_until(|app| app.diagnostic_view().counts.0 == 2));
+    let log = fs::read_to_string(h.root.join("lsp.log")).unwrap();
+    assert!(log.contains("textDocument/didChange"));
+    assert!(log.contains("reply cfg1 [null, null]"), "{log}");
+    h.app.shutdown();
+    let log = fs::read_to_string(h.root.join("lsp.log")).unwrap();
+    assert!(log.contains("shutdown\nexit"), "{log}");
+}
+
+#[test]
+fn ctags_answers_without_a_language_server() {
+    if !has("ctags") {
+        eprintln!("ctags not installed: skipped");
+        return;
+    }
+    let mut h = Harness::editor(
+        |root| {
+            fs::create_dir_all(root.join("src")).unwrap();
+            fs::write(root.join("src/main.c"), HELPER_C).unwrap();
+            fs::write(
+                root.join("src/net.c"),
+                "struct conn { int fd; };\nint net_open(struct conn *c) { return c->fd; }\n",
+            )
+            .unwrap();
+        },
+        &["src", "src/main.c"],
+    );
+    h.app.config.lsp.enabled = false;
+    h.press(ctrl('g'));
+    h.type_str("3:12");
+    h.press(key(KeyCode::Enter));
+    // The first F12 starts the index; once it is there, F12 finds helper.
+    h.press(key(KeyCode::F(12)));
+    assert!(h.pump_until(App::lsp_tags_ready));
+    h.press(key(KeyCode::F(12)));
+    assert_eq!(editor_cursor(&h), (0, 4));
+    h.press(KeyEvent::new(KeyCode::Left, KeyModifiers::ALT));
+    assert_eq!(editor_cursor(&h), (2, 11));
+    // Ctrl+T searches the tags of every file.
+    h.press(ctrl('t'));
+    h.press(ctrl('u'));
+    h.type_str("netop");
+    assert_eq!(finder(&h).items[0].label, "net_open");
+    assert!(finder(&h).items[0].detail.starts_with("function · net.c:2"));
+    h.press(key(KeyCode::Enter));
+    assert!(h.ctx().editor.as_ref().unwrap().path().ends_with("net.c"));
+    assert_eq!(editor_cursor(&h), (1, 4));
+    // Ctrl+Shift+O: the file's symbols from ctags.
+    h.press(KeyEvent::new(
+        KeyCode::Char('O'),
+        KeyModifiers::CONTROL | KeyModifiers::SHIFT,
+    ));
+    let names: Vec<&str> = finder(&h).items.iter().map(|i| i.label.as_str()).collect();
+    assert_eq!(names, ["conn", "conn::fd", "net_open"]);
+}
+
+#[test]
+fn clangd_finds_a_definition() {
+    if !has("clangd") {
+        eprintln!("clangd not installed: skipped");
+        return;
+    }
+    let mut h = Harness::editor(
+        |root| {
+            fs::create_dir_all(root.join("src")).unwrap();
+            fs::write(root.join("src/compile_flags.txt"), "-xc\n-std=c11\n").unwrap();
+            fs::write(
+                root.join("src/main.c"),
+                HELPER_C.replace("  bad;\n  hel\n", ""),
+            )
+            .unwrap();
+        },
+        &["src/main.c"],
+    );
+    h.app.config.lsp.servers.insert("c".into(), "clangd".into());
+    h.app.lsp_sync();
+    h.press(ctrl('g'));
+    h.type_str("3:12");
+    h.press(key(KeyCode::Enter));
+    assert!(h.pump_until(App::lsp_ready_for_active));
+    h.press(key(KeyCode::F(12)));
+    assert!(h.pump_until(|app| app
+        .active_context()
+        .and_then(|c| c.editor.as_ref())
+        .is_some_and(|e| e.cursor() == (0, 4))));
+    h.app.shutdown();
 }
